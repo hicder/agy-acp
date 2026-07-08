@@ -30,6 +30,13 @@ pub struct Adapter {
 
 impl Adapter {
     pub const MODEL_CONFIG_ID: &'static str = "model";
+    pub const MODES: &'static [(&'static str, &'static str)] = &[
+        ("default", "Default"),
+        ("plan", "Plan"),
+        ("acceptEdits", "Accept Edits"),
+        ("bypassPermissions", "Bypass Permissions"),
+    ];
+    pub const DEFAULT_MODE_ID: &'static str = "default";
 
     pub fn new() -> Self {
         Self::new_with_skip_naration(false)
@@ -119,15 +126,30 @@ impl Adapter {
         }])
     }
 
+    /// Build the ACP `modes` JSON for a session, given its current mode_id.
+    pub fn session_modes_json(&self, mode_id: Option<&str>) -> Value {
+        let current = mode_id.unwrap_or(Self::DEFAULT_MODE_ID);
+        let available: Vec<Value> = Self::MODES
+            .iter()
+            .map(|(id, name)| json!({ "id": id, "name": name }))
+            .collect();
+        json!({
+            "currentModeId": current,
+            "availableModes": available,
+        })
+    }
+
     pub fn session_config_result_json(
         &mut self,
         session_id: &str,
         model_id: Option<&str>,
+        mode_id: Option<&str>,
     ) -> Value {
         json!({
             "sessionId": session_id,
             "models": self.session_models_json(model_id),
             "configOptions": self.session_config_options_json(model_id),
+            "modes": self.session_modes_json(mode_id),
         })
     }
 
@@ -161,13 +183,16 @@ impl Adapter {
         self.load_store_inner()
     }
 
-    /// Try to restore conversation_id, last_step_idx, and model_id from persisted state.
-    pub fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>)> {
+    /// Try to restore conversation_id, last_step_idx, model_id, and mode_id from persisted state.
+    pub fn restore_session(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, i64, Option<String>, Option<String>)> {
         let store = self.load_store();
         store.sessions.get(session_id).and_then(|s| {
             s.conversation_id
                 .clone()
-                .map(|cid| (cid, s.last_step_idx, s.model_id.clone()))
+                .map(|cid| (cid, s.last_step_idx, s.model_id.clone(), s.mode_id.clone()))
         })
     }
 
@@ -178,6 +203,7 @@ impl Adapter {
         conversation_id: Option<&str>,
         last_step_idx: i64,
         model_id: Option<&str>,
+        mode_id: Option<&str>,
     ) {
         let Some(_lock) = self.lock_state_file() else {
             return;
@@ -189,6 +215,7 @@ impl Adapter {
                 conversation_id: conversation_id.map(String::from),
                 last_step_idx,
                 model_id: model_id.map(String::from),
+                mode_id: mode_id.map(String::from),
             },
         );
         let tmp = self.state_file.with_extension("tmp");
@@ -290,7 +317,8 @@ impl Adapter {
     }
 
     pub fn restore_session_state(&mut self, session_id: &str) -> bool {
-        let Some((conversation_id, last_step_idx, model_id)) = self.restore_session(session_id)
+        let Some((conversation_id, last_step_idx, model_id, mode_id)) =
+            self.restore_session(session_id)
         else {
             return false;
         };
@@ -303,6 +331,7 @@ impl Adapter {
                 conversation_id: Some(conversation_id),
                 last_step_idx,
                 model_id,
+                mode_id,
             },
         );
         true
@@ -334,9 +363,11 @@ impl Adapter {
                 conversation_id: None,
                 last_step_idx: -1,
                 model_id: None,
+                mode_id: Some(Self::DEFAULT_MODE_ID.to_string()),
             },
         );
-        let result = self.session_config_result_json(&session_id, None);
+        let result =
+            self.session_config_result_json(&session_id, None, Some(Self::DEFAULT_MODE_ID));
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -402,11 +433,16 @@ impl Adapter {
                     .sessions
                     .get(session_id)
                     .and_then(|s| s.model_id.clone());
+                let mode_id = self
+                    .sessions
+                    .get(session_id)
+                    .and_then(|s| s.mode_id.clone());
                 self.persist_session(
                     session_id,
                     Some(conv_id.as_str()),
                     max_step_idx,
                     model_id.as_deref(),
+                    mode_id.as_deref(),
                 );
             }
         }
@@ -416,7 +452,12 @@ impl Adapter {
                 .sessions
                 .get(session_id)
                 .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let mode_id = self
+                .sessions
+                .get(session_id)
+                .and_then(|s| s.mode_id.clone());
+            let result =
+                self.session_config_result_json(session_id, model_id.as_deref(), mode_id.as_deref());
             serde_json::to_string(&JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -449,7 +490,12 @@ impl Adapter {
                 .sessions
                 .get(session_id)
                 .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let mode_id = self
+                .sessions
+                .get(session_id)
+                .and_then(|s| s.mode_id.clone());
+            let result =
+                self.session_config_result_json(session_id, model_id.as_deref(), mode_id.as_deref());
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -503,6 +549,7 @@ impl Adapter {
 
         session.model_id = Some(model_id.to_string());
         let model_id_str = session.model_id.clone();
+        let mode_id_str = session.mode_id.clone();
         let last_step_idx = session.last_step_idx;
         let conv_id = session.conversation_id.clone();
 
@@ -511,6 +558,73 @@ impl Adapter {
             conv_id.as_deref(),
             last_step_idx,
             model_id_str.as_deref(),
+            mode_id_str.as_deref(),
+        );
+
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(json!({})),
+            error: None,
+        }
+    }
+
+    pub fn handle_session_set_mode(&mut self, id: Value, params: &Value) -> JsonRpcResponse {
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mode_id = params.get("modeId").and_then(|v| v.as_str()).unwrap_or("");
+
+        if session_id.is_empty() || mode_id.is_empty() {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code":-32602,"message":"missing sessionId or modeId"})),
+            };
+        }
+
+        if !Self::MODES.iter().any(|(id, _)| *id == mode_id) {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({
+                    "code": -32602,
+                    "message": format!("unknown modeId: {mode_id}"),
+                })),
+            };
+        }
+
+        if !self.sessions.contains_key(session_id) {
+            let _ = self.restore_session_state(session_id);
+        }
+
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({
+                    "code": -32000,
+                    "message": format!("unknown sessionId: {session_id}"),
+                })),
+            };
+        };
+
+        session.mode_id = Some(mode_id.to_string());
+        let mode_id_str = session.mode_id.clone();
+        let model_id_str = session.model_id.clone();
+        let last_step_idx = session.last_step_idx;
+        let conv_id = session.conversation_id.clone();
+
+        self.persist_session(
+            session_id,
+            conv_id.as_deref(),
+            last_step_idx,
+            model_id_str.as_deref(),
+            mode_id_str.as_deref(),
         );
 
         JsonRpcResponse {
@@ -577,6 +691,7 @@ impl Adapter {
 
         session.model_id = Some(model_id.to_string());
         let model_id_str = session.model_id.clone();
+        let mode_id_str = session.mode_id.clone();
         let last_step_idx = session.last_step_idx;
         let conv_id = session.conversation_id.clone();
 
@@ -585,6 +700,7 @@ impl Adapter {
             conv_id.as_deref(),
             last_step_idx,
             model_id_str.as_deref(),
+            mode_id_str.as_deref(),
         );
 
         let config_options = self.session_config_options_json(model_id_str.as_deref());
@@ -648,6 +764,23 @@ impl Adapter {
             if let Some(model_id) = &session.model_id {
                 args.push("--model".to_string());
                 args.push(model_id.clone());
+            }
+            match session.mode_id.as_deref() {
+                Some("plan") => {
+                    args.push("--mode".to_string());
+                    args.push("plan".to_string());
+                }
+                Some("acceptEdits") => {
+                    args.push("--mode".to_string());
+                    args.push("accept-edits".to_string());
+                }
+                Some("bypassPermissions") => {
+                    args.push("--dangerously-skip-permissions".to_string());
+                }
+                _ => {
+                    // "default" (or unset): omit --mode entirely, agy's normal
+                    // confirm-before-edit interactive behavior.
+                }
             }
         }
         args.push("-p".to_string());
@@ -794,11 +927,16 @@ impl Adapter {
                 .sessions
                 .get(session_id)
                 .and_then(|s| s.model_id.clone());
+            let mode_id = self
+                .sessions
+                .get(session_id)
+                .and_then(|s| s.mode_id.clone());
             self.persist_session(
                 session_id,
                 bound_conv_id.as_deref(),
                 new_step_idx,
                 model_id.as_deref(),
+                mode_id.as_deref(),
             );
         }
 
