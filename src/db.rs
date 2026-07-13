@@ -141,8 +141,8 @@ pub fn read_delta_from_db(
     let mut max_idx = after_step_idx;
     let mut response_parts: Vec<String> = Vec::new();
     for (idx, step_type, payload) in &rows {
-        max_idx = max_idx.max(*idx);
         if *step_type == 15 {
+            max_idx = max_idx.max(*idx);
             if let Some(text) = extract_text_from_step_payload(payload) {
                 if !text.is_empty() {
                     response_parts.push(text);

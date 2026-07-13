@@ -1,5 +1,6 @@
 mod adapter;
 mod db;
+mod log_scan;
 mod protobuf;
 mod streaming;
 mod types;
@@ -153,6 +154,15 @@ async fn main() {
                 let params = req.params.unwrap_or(json!({}));
                 let mut adapter = adapter.lock().await;
                 vec![serde_json::to_string(&adapter.handle_session_resume(id, &params)).unwrap()]
+            }
+            Some("session/list") => {
+                let adapter = adapter.lock().await;
+                vec![serde_json::to_string(&adapter.handle_session_list(id)).unwrap()]
+            }
+            Some("session/delete") => {
+                let params = req.params.unwrap_or(json!({}));
+                let mut adapter = adapter.lock().await;
+                vec![serde_json::to_string(&adapter.handle_session_delete(id, &params)).unwrap()]
             }
             Some("session/prompt") => {
                 let params = req.params.unwrap_or(json!({}));

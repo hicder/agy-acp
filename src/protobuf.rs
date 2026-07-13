@@ -427,7 +427,12 @@ pub fn message_chunk_update(session_update: &str, text: String) -> Value {
     })
 }
 
-type ParsedToolRun = (Option<String>, Option<String>, Option<Value>, Option<String>);
+type ParsedToolRun = (
+    Option<String>,
+    Option<String>,
+    Option<Value>,
+    Option<String>,
+);
 
 fn parse_tool_run(blob: &[u8]) -> Option<ParsedToolRun> {
     get_varint_field(blob, 1)?;
@@ -617,6 +622,23 @@ pub fn extract_tool_update_from_step_payload(
                 .as_ref()
                 .and_then(|input| tool_content(input, false))
         });
+
+    // Thought/reasoning steps should be emitted as agent_thought_chunk even when
+    // the derived tool title does not contain "think" (e.g. "Analyzing test output").
+    if let Some(text) = raw_input
+        .as_ref()
+        .and_then(|input| {
+            ["thought", "thinking", "reasoning"]
+                .iter()
+                .find_map(|key| input.get(key).and_then(|v| v.as_str()))
+        })
+        .filter(|text| !text.trim().is_empty())
+    {
+        return Some(message_chunk_update(
+            "agent_thought_chunk",
+            text.to_string(),
+        ));
+    }
 
     if kind == "think" {
         let thought_text = raw_input

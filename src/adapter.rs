@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -16,6 +17,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::db::read_delta_from_db;
 use crate::db::read_replay_updates_from_db;
+use crate::log_scan;
 use crate::streaming::poll_streaming_delta;
 use crate::types::*;
 
@@ -38,22 +40,92 @@ impl Adapter {
     pub fn new_with_skip_naration(skip_naration: bool) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let state_dir = PathBuf::from(&home).join(".openab/agy-acp");
-        Self {
+        let mut adapter = Self {
             sessions: HashMap::new(),
             working_dir: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "/tmp".to_string()),
             conversations_dir: PathBuf::from(&home).join(".gemini/antigravity-cli/conversations"),
             state_file: state_dir.join("sessions.json"),
-            available_models: Self::fetch_available_models(),
+            available_models: Vec::new(),
             skip_naration,
+        };
+        let models = adapter.fetch_available_models();
+        if !models.is_empty() {
+            eprintln!(
+                "[agy-acp] fetched {} models from `agy models`, updating cache",
+                models.len()
+            );
+            adapter.save_models_cache(&models);
+            adapter.available_models = models;
+        } else if let Some(cached) = adapter.load_cached_models() {
+            eprintln!(
+                "[agy-acp] `agy models` failed, using cached model list ({} models)",
+                cached.len()
+            );
+            adapter.available_models = cached;
+        } else {
+            eprintln!("[agy-acp] `agy models` failed and no cache found, using hardcoded fallback");
+            adapter.available_models = Self::static_fallback_models();
+        }
+        adapter
+    }
+
+    // --- Model cache ---
+
+    pub fn models_cache_path(&self) -> PathBuf {
+        self.state_file.with_file_name("models_cache.json")
+    }
+
+    pub fn load_cached_models(&self) -> Option<Vec<String>> {
+        let path = self.models_cache_path();
+        let content = fs::read_to_string(&path).ok()?;
+        serde_json::from_str::<Vec<String>>(&content)
+            .ok()
+            .filter(|v| !v.is_empty())
+    }
+
+    pub fn save_models_cache(&self, models: &[String]) {
+        if let Some(parent) = self.models_cache_path().parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(models) {
+            let tmp = self.models_cache_path().with_extension("tmp");
+            if fs::write(&tmp, &json).is_ok() {
+                let _ = fs::rename(&tmp, self.models_cache_path());
+            }
         }
     }
 
+    pub fn static_fallback_models() -> Vec<String> {
+        vec![
+            "Gemini 3.5 Flash (Medium)".to_string(),
+            "Gemini 3.5 Flash (High)".to_string(),
+            "Gemini 3.5 Flash (Low)".to_string(),
+            "Gemini 3.1 Pro (Low)".to_string(),
+            "Gemini 3.1 Pro (High)".to_string(),
+        ]
+    }
+
+    /// Resolve the `agy` binary path.
+    pub fn agy_bin() -> &'static str {
+        "/usr/local/bin/agy"
+    }
+
+    /// Build PATH with common agent binary locations prepended.
+    pub fn augmented_path() -> String {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
+        let base =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+        format!("{home}/bin:{home}/.local/bin:{home}/.local/share/fnm/aliases/default/bin:{base}")
+    }
+
     /// Run `agy models` and parse the output into a list of model names.
-    fn fetch_available_models() -> Vec<String> {
-        std::process::Command::new("agy")
+    fn fetch_available_models(&self) -> Vec<String> {
+        std::process::Command::new(Self::agy_bin())
             .arg("models")
+            .env("PATH", Self::augmented_path())
+            .stderr(Stdio::null())
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -67,16 +139,39 @@ impl Adapter {
             .unwrap_or_default()
     }
 
+    fn get_available_models(&mut self) -> &[String] {
+        if self.available_models.is_empty() {
+            let models = self.fetch_available_models();
+            if !models.is_empty() {
+                eprintln!(
+                    "[agy-acp] fetched {} models from `agy models`, updating cache",
+                    models.len()
+                );
+                self.save_models_cache(&models);
+                self.available_models = models;
+            } else if let Some(cached) = self.load_cached_models() {
+                eprintln!(
+                    "[agy-acp] `agy models` failed, using cached model list ({} models)",
+                    cached.len()
+                );
+                self.available_models = cached;
+            } else {
+                eprintln!(
+                    "[agy-acp] `agy models` failed and no cache found, using hardcoded fallback"
+                );
+                self.available_models = Self::static_fallback_models();
+            }
+        }
+        &self.available_models
+    }
+
     /// Build the ACP `models` JSON for a session, given its current model_id.
     pub fn session_models_json(&mut self, model_id: Option<&str>) -> Value {
-        if self.available_models.is_empty() {
-            self.available_models = Self::fetch_available_models();
-        }
+        let models = self.get_available_models();
         let current = model_id
-            .or_else(|| self.available_models.first().map(|s| s.as_str()))
+            .or_else(|| models.first().map(|s| s.as_str()))
             .unwrap_or("");
-        let available: Vec<Value> = self
-            .available_models
+        let available: Vec<Value> = models
             .iter()
             .map(|name| {
                 json!({
@@ -93,14 +188,11 @@ impl Adapter {
 
     /// Build the ACP session config option that Zed uses for its model selector.
     pub fn session_config_options_json(&mut self, model_id: Option<&str>) -> Value {
-        if self.available_models.is_empty() {
-            self.available_models = Self::fetch_available_models();
-        }
+        let models = self.get_available_models();
         let current = model_id
-            .or_else(|| self.available_models.first().map(|s| s.as_str()))
+            .or_else(|| models.first().map(|s| s.as_str()))
             .unwrap_or("");
-        let options: Vec<Value> = self
-            .available_models
+        let options: Vec<Value> = models
             .iter()
             .map(|name| {
                 json!({
@@ -317,7 +409,15 @@ impl Adapter {
                 "agentInfo": { "name": "agy", "version": env!("CARGO_PKG_VERSION") },
                 "agentCapabilities": {
                     "loadSession": true,
-                    "sessionCapabilities": { "resume": {} },
+                    "streaming": true,
+                    "promptCapabilities": {
+                        "text": true,
+                    },
+                    "sessionCapabilities": {
+                        "resume": true,
+                        "list": true,
+                        "delete": true,
+                    },
                 },
                 "authMethods": [],
             })),
@@ -466,6 +566,60 @@ impl Adapter {
                 "code": -32000,
                 "message": format!("unknown sessionId: {session_id}"),
             })),
+        }
+    }
+
+    pub fn handle_session_list(&self, id: Value) -> JsonRpcResponse {
+        let store = self.load_store();
+        let sessions: Vec<Value> = store
+            .sessions
+            .iter()
+            .map(|(session_id, stored)| {
+                json!({
+                    "sessionId": session_id,
+                    "conversationId": stored.conversation_id,
+                    "modelId": stored.model_id,
+                    "lastStepIdx": stored.last_step_idx,
+                })
+            })
+            .collect();
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(json!({ "sessions": sessions })),
+            error: None,
+        }
+    }
+
+    pub fn handle_session_delete(&mut self, id: Value, params: &Value) -> JsonRpcResponse {
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if session_id.is_empty() {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code":-32602,"message":"missing sessionId"})),
+            };
+        }
+        self.sessions.remove(session_id);
+        if let Some(_lock) = self.lock_state_file() {
+            let mut store = self.load_store_inner();
+            store.sessions.remove(session_id);
+            let tmp = self.state_file.with_extension("tmp");
+            if let Ok(file) = fs::File::create(&tmp) {
+                if serde_json::to_writer_pretty(&file, &store).is_ok() {
+                    let _ = fs::rename(&tmp, &self.state_file);
+                }
+            }
+        }
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(json!({})),
+            error: None,
         }
     }
 
@@ -634,11 +788,29 @@ impl Adapter {
             None
         };
 
+        let log_pre_snapshot = log_scan::snapshot_agy_logs(&self.conversations_dir);
+        let spawn_time = std::time::SystemTime::now();
+
         let mut args: Vec<String> = Vec::new();
         args.push("--add-dir".to_string());
         args.push(self.working_dir.clone());
+        if let Some(dirs) = params
+            .get("additionalDirectories")
+            .and_then(|v| v.as_array())
+        {
+            for dir in dirs {
+                if let Some(dir_str) = dir.as_str() {
+                    args.push("--add-dir".to_string());
+                    args.push(dir_str.to_string());
+                }
+            }
+        }
         if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
-            args.extend(extra.split_whitespace().map(String::from));
+            if let Ok(parsed) = shell_words::split(&extra) {
+                args.extend(parsed);
+            } else {
+                eprintln!("[agy-acp] WARN: failed to parse AGY_EXTRA_ARGS, ignoring");
+            }
         }
         if let Some(session) = self.sessions.get(session_id) {
             if let Some(conv_id) = &session.conversation_id {
@@ -653,8 +825,9 @@ impl Adapter {
         args.push("-p".to_string());
         args.push(clean_prompt.to_string());
 
-        let spawn_result = Command::new("agy")
+        let spawn_result = Command::new(Self::agy_bin())
             .args(&args)
+            .env("PATH", Self::augmented_path())
             .current_dir(&self.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -804,16 +977,11 @@ impl Adapter {
 
         let stop_reason = if was_cancelled {
             "cancelled"
+        } else if result.as_ref().map(|s| !s.success()).unwrap_or(false) {
+            "error"
         } else {
             "end_turn"
         };
-        let output_lines = vec![serde_json::to_string(&JsonRpcResponse {
-            jsonrpc: "2.0",
-            id: id.clone(),
-            result: Some(json!({ "stopReason": stop_reason })),
-            error: None,
-        })
-        .unwrap()];
 
         match result {
             Ok(status) => {
@@ -821,23 +989,38 @@ impl Adapter {
                 if !stderr_text.is_empty() {
                     eprintln!("[agy-acp] agy stderr: {}", stderr_text.trim_end());
                 }
-
                 if !was_cancelled && !status.success() {
                     eprintln!("[agy-acp] WARN: agy exited with status: {}", status);
-                    if !had_updates {
-                        let msg = if stderr_text.is_empty() {
-                            format!("agy exited with status: {}", status)
-                        } else {
-                            format!("agy failed: {}", stderr_text.trim_end())
-                        };
-                        return vec![serde_json::to_string(&JsonRpcResponse {
-                            jsonrpc: "2.0",
-                            id,
-                            result: None,
-                            error: Some(json!({"code":-32000,"message":msg})),
-                        })
-                        .unwrap()];
-                    }
+                }
+                // agy --print swallows backend failures (e.g. quota 429 /
+                // RESOURCE_EXHAUSTED) with a 0 exit code and empty stdout/stderr,
+                // recording the cause only in its own cli.log; an empty successful
+                // turn is therefore almost always a hidden error.
+                let swallowed_error = if !was_cancelled && status.success() && !had_updates {
+                    log_scan::detect_swallowed_agy_error(
+                        &self.conversations_dir,
+                        &log_pre_snapshot,
+                        spawn_time,
+                    )
+                } else {
+                    None
+                };
+                if let Some((code, msg)) = log_scan::decide_turn_error(
+                    was_cancelled,
+                    status.success(),
+                    had_updates,
+                    &status.to_string(),
+                    &stderr_text,
+                    swallowed_error.as_deref(),
+                ) {
+                    eprintln!("[agy-acp] surfacing turn error ({code}): {msg}");
+                    return vec![serde_json::to_string(&JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(json!({"code":code,"message":msg})),
+                    })
+                    .unwrap()];
                 }
             }
             Err(e) => {
@@ -853,7 +1036,13 @@ impl Adapter {
             }
         }
 
-        output_lines
+        vec![serde_json::to_string(&JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(json!({ "stopReason": stop_reason })),
+            error: None,
+        })
+        .unwrap()]
     }
 }
 

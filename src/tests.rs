@@ -533,6 +533,111 @@ fn test_initialize_advertises_resume_capability() {
 }
 
 #[test]
+fn test_initialize_advertises_prompt_capabilities() {
+    let adapter = Adapter::new();
+    let response = adapter.handle_initialize(json!(1));
+    assert_eq!(
+        response
+            .result
+            .as_ref()
+            .and_then(|r| r.get("agentCapabilities"))
+            .and_then(|c| c.get("promptCapabilities"))
+            .and_then(|p| p.get("text"))
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_initialize_advertises_session_list_and_delete() {
+    let adapter = Adapter::new();
+    let response = adapter.handle_initialize(json!(1));
+    let caps = response
+        .result
+        .as_ref()
+        .and_then(|r| r.get("agentCapabilities"))
+        .and_then(|c| c.get("sessionCapabilities"));
+    assert!(
+        caps.as_ref().and_then(|c| c.get("list")).is_some(),
+        "sessionCapabilities.list should be present"
+    );
+    assert!(
+        caps.as_ref().and_then(|c| c.get("delete")).is_some(),
+        "sessionCapabilities.delete should be present"
+    );
+}
+
+#[test]
+#[ignore]
+fn test_session_list_returns_persisted_sessions() {
+    let root = std::env::temp_dir().join(format!("agy-acp-list-{}-", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+    let adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        conversations_dir: root.join("conversations"),
+        state_file: root.join("sessions.json"),
+        available_models: vec![],
+        skip_naration: false,
+    };
+    adapter.persist_session("sess-a", Some("conv-a"), 3, Some("model-a"));
+    adapter.persist_session("sess-b", Some("conv-b"), 7, None);
+
+    let response = adapter.handle_session_list(json!(1));
+    let result = response
+        .result
+        .expect("session/list should return a result");
+    let sessions = result["sessions"]
+        .as_array()
+        .expect("sessions should be an array");
+    assert_eq!(sessions.len(), 2);
+    let ids: Vec<_> = sessions
+        .iter()
+        .map(|s| s["sessionId"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"sess-a"));
+    assert!(ids.contains(&"sess-b"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore]
+fn test_session_delete_removes_persisted_session() {
+    let root = std::env::temp_dir().join(format!("agy-acp-delete-{}-", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        conversations_dir: root.join("conversations"),
+        state_file: root.join("sessions.json"),
+        available_models: vec![],
+        skip_naration: false,
+    };
+    adapter.persist_session("sess-del", Some("conv-del"), 5, None);
+
+    let response = adapter.handle_session_delete(json!(1), &json!({"sessionId": "sess-del"}));
+    assert!(
+        response.result.is_some(),
+        "session/delete should return a result"
+    );
+
+    let list_response = adapter.handle_session_list(json!(2));
+    let sessions = list_response.result.unwrap()["sessions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        sessions
+            .iter()
+            .all(|s| s["sessionId"].as_str() != Some("sess-del")),
+        "deleted session should not appear in list"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 #[ignore]
 fn test_session_load_restores_persisted_session() {
     let root = std::env::temp_dir().join(format!("agy-acp-load-{}", Uuid::new_v4()));
@@ -749,7 +854,9 @@ fn test_session_load_replays_conversation_history() {
         .filter(|notification| {
             matches!(
                 notification["params"]["update"]["sessionUpdate"].as_str(),
-                Some("user_message_chunk") | Some("agent_message_chunk")
+                Some("user_message_chunk")
+                    | Some("agent_message_chunk")
+                    | Some("agent_thought_chunk")
             )
         })
         .collect();
