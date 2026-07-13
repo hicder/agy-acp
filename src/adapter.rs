@@ -107,24 +107,10 @@ impl Adapter {
         ]
     }
 
-    /// Resolve the `agy` binary path.
-    pub fn agy_bin() -> &'static str {
-        "/usr/local/bin/agy"
-    }
-
-    /// Build PATH with common agent binary locations prepended.
-    pub fn augmented_path() -> String {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
-        let base =
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
-        format!("{home}/bin:{home}/.local/bin:{home}/.local/share/fnm/aliases/default/bin:{base}")
-    }
-
     /// Run `agy models` and parse the output into a list of model names.
     fn fetch_available_models(&self) -> Vec<String> {
-        std::process::Command::new(Self::agy_bin())
+        std::process::Command::new("agy")
             .arg("models")
-            .env("PATH", Self::augmented_path())
             .stderr(Stdio::null())
             .output()
             .ok()
@@ -825,9 +811,8 @@ impl Adapter {
         args.push("-p".to_string());
         args.push(clean_prompt.to_string());
 
-        let spawn_result = Command::new(Self::agy_bin())
+        let spawn_result = Command::new("agy")
             .args(&args)
-            .env("PATH", Self::augmented_path())
             .current_dir(&self.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

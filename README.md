@@ -22,10 +22,11 @@ Zed (ACP host)  <--stdin/stdout JSON-RPC-->  agy-acp  <--subprocess-->  agy  <--
 cargo build --release
 ```
 
-The binary is at `target/release/agy-acp`. Copy it somewhere in your `PATH`:
+The binary is at `target/release/agy-acp`. Copy it somewhere in your `PATH` (for example, a directory already on `PATH` or `~/.local/bin`):
 
 ```bash
-cp target/release/agy-acp /usr/local/bin/
+cp target/release/agy-acp ~/.local/bin/
+# or any other directory on your PATH
 ```
 
 ## Use with Zed
