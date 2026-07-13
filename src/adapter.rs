@@ -107,9 +107,32 @@ impl Adapter {
         ]
     }
 
+    /// Resolve the `agy` binary to use.
+    ///
+    /// Resolution order:
+    /// 1. `AGY_BIN_PATH` environment variable (full path to the binary).
+    /// 2. `AGY_INSTALL_PATH` environment variable (directory containing the binary).
+    /// 3. `agy` in the caller's PATH.
+    fn agy_bin() -> String {
+        if let Ok(path) = std::env::var("AGY_BIN_PATH") {
+            if !path.is_empty() {
+                return path;
+            }
+        }
+        if let Ok(dir) = std::env::var("AGY_INSTALL_PATH") {
+            if !dir.is_empty() {
+                return std::path::PathBuf::from(dir)
+                    .join("agy")
+                    .to_string_lossy()
+                    .to_string();
+            }
+        }
+        "agy".to_string()
+    }
+
     /// Run `agy models` and parse the output into a list of model names.
     fn fetch_available_models(&self) -> Vec<String> {
-        std::process::Command::new("agy")
+        std::process::Command::new(Self::agy_bin())
             .arg("models")
             .stderr(Stdio::null())
             .output()
@@ -811,7 +834,7 @@ impl Adapter {
         args.push("-p".to_string());
         args.push(clean_prompt.to_string());
 
-        let spawn_result = Command::new("agy")
+        let spawn_result = Command::new(Self::agy_bin())
             .args(&args)
             .current_dir(&self.working_dir)
             .stdin(std::process::Stdio::null())

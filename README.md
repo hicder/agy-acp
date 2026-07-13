@@ -76,6 +76,8 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 | Variable | Description |
 |---|---|
 | `GEMINI_API_KEY` | API key for Gemini (passed through to `agy`) |
+| `AGY_BIN_PATH` | Full path to the `agy` binary (optional; overrides PATH lookup) |
+| `AGY_INSTALL_PATH` | Directory containing the `agy` binary (optional; used if `AGY_BIN_PATH` is unset) |
 | `AGY_EXTRA_ARGS` | Space-separated extra args passed to every `agy` invocation |
 
 ## Session Persistence
