@@ -1232,20 +1232,13 @@ fn test_read_response_from_db() {
 }
 
 fn prepare_auth() -> bool {
-    if std::env::var("GEMINI_API_KEY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        eprintln!("[e2e] Using GEMINI_API_KEY");
-        return true;
-    }
     let home = std::env::var("HOME").unwrap_or_default();
     let settings = format!("{}/.gemini/antigravity-cli/settings.json", home);
     if std::path::Path::new(&settings).exists() {
         eprintln!("[e2e] Using local auth (keyring)");
         return true;
     }
-    eprintln!("SKIP: No GEMINI_API_KEY and no local auth found");
+    eprintln!("SKIP: No local auth found at ~/.gemini/antigravity-cli/settings.json");
     false
 }
 

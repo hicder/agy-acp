@@ -14,7 +14,7 @@ Zed (ACP host)  <--stdin/stdout JSON-RPC-->  agy-acp  <--subprocess-->  agy  <--
 
 - **Rust** (1.70+) with Cargo
 - **`agy`** installed and in your `PATH` — install from [google-antigravity/antigravity-cli releases](https://github.com/google-antigravity/antigravity-cli)
-- **Authentication** — either set `GEMINI_API_KEY` or configure auth via `~/.gemini/antigravity-cli/settings.json`
+- **Authentication** — sign in with `agy` OAuth so that `~/.gemini/antigravity-cli/settings.json` exists
 
 ## Build & Install
 
@@ -75,7 +75,6 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 
 | Variable | Description |
 |---|---|
-| `GEMINI_API_KEY` | API key for Gemini (passed through to `agy`) |
 | `AGY_BIN_PATH` | Full path to the `agy` binary (optional; overrides PATH lookup) |
 | `AGY_INSTALL_PATH` | Directory containing the `agy` binary (optional; used if `AGY_BIN_PATH` is unset) |
 | `AGY_EXTRA_ARGS` | Space-separated extra args passed to every `agy` invocation |

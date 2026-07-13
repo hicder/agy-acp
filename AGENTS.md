@@ -36,7 +36,7 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 2. **Ignored I/O tests** (`-- --include-ignored`) — session persist/restore, SQLite read, conversation snapshot. Create temp dirs in `$TMPDIR`.
 3. **E2E tests** (`e2e -- --ignored`) — spawn the release binary, send JSON-RPC over stdin, verify responses. Requires:
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
-   - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
+   - Auth via `agy` OAuth sign-in (`~/.gemini/antigravity-cli/settings.json` must exist)
    - `cargo build --release` must have been run first
 
 ## Environment variables
@@ -44,7 +44,6 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 | Var | Effect |
 |---|---|
 | `AGY_EXTRA_ARGS` | Space-separated extra args passed to every `agy` invocation |
-| `GEMINI_API_KEY` | API key for e2e tests and CI |
 
 ## Quirks
 
