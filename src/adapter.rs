@@ -123,11 +123,47 @@ impl Adapter {
         &mut self,
         session_id: &str,
         model_id: Option<&str>,
+        mode_id: Option<&str>,
     ) -> Value {
+        let available_modes = json!([
+            {
+                "id": "default",
+                "name": "Default",
+                "description": "Default mode - no mode argument is passed"
+            },
+            {
+                "id": "plan",
+                "name": "Plan",
+                "description": "Plan mode - generates steps and requests confirmation"
+            },
+            {
+                "id": "accept-edits",
+                "name": "Accept Edits",
+                "description": "Accept edits mode"
+            },
+            {
+                "id": "auto-approve",
+                "name": "Auto Approve",
+                "description": "Auto approve mode (alias of accept-edits)"
+            },
+            {
+                "id": "yolo",
+                "name": "Yolo",
+                "description": "Yolo mode - skips security/permissions warnings"
+            }
+        ]);
+        let current_mode = mode_id.unwrap_or("default");
+
         json!({
             "sessionId": session_id,
             "models": self.session_models_json(model_id),
             "configOptions": self.session_config_options_json(model_id),
+            "availableModes": available_modes,
+            "currentModeId": current_mode,
+            "sessionMode": {
+                "currentModeId": current_mode,
+                "availableModes": available_modes,
+            }
         })
     }
 
@@ -162,12 +198,12 @@ impl Adapter {
     }
 
     /// Try to restore conversation_id, last_step_idx, and model_id from persisted state.
-    pub fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>, Option<String>, Vec<String>)> {
+    pub fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>, Option<String>, Vec<String>, Option<String>)> {
         let store = self.load_store();
         store.sessions.get(session_id).and_then(|s| {
             s.conversation_id
                 .clone()
-                .map(|cid| (cid, s.last_step_idx, s.model_id.clone(), s.cwd.clone(), s.additional_directories.clone()))
+                .map(|cid| (cid, s.last_step_idx, s.model_id.clone(), s.cwd.clone(), s.additional_directories.clone(), s.mode_id.clone()))
         })
     }
 
@@ -183,12 +219,12 @@ impl Adapter {
             return;
         };
         let mut store = self.load_store_inner();
-        let (cwd, additional_directories) = if let Some(s) = self.sessions.get(session_id) {
-            (s.cwd.clone(), s.additional_directories.clone())
+        let (cwd, additional_directories, mode_id) = if let Some(s) = self.sessions.get(session_id) {
+            (s.cwd.clone(), s.additional_directories.clone(), s.mode_id.clone())
         } else if let Some(old) = store.sessions.get(session_id) {
-            (old.cwd.clone(), old.additional_directories.clone())
+            (old.cwd.clone(), old.additional_directories.clone(), old.mode_id.clone())
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), None)
         };
         store.sessions.insert(
             session_id.to_string(),
@@ -198,6 +234,7 @@ impl Adapter {
                 model_id: model_id.map(String::from),
                 cwd,
                 additional_directories,
+                mode_id,
             },
         );
         let tmp = self.state_file.with_extension("tmp");
@@ -299,7 +336,7 @@ impl Adapter {
     }
 
     pub fn restore_session_state(&mut self, session_id: &str) -> bool {
-        let Some((conversation_id, last_step_idx, model_id, cwd, additional_directories)) = self.restore_session(session_id)
+        let Some((conversation_id, last_step_idx, model_id, cwd, additional_directories, mode_id)) = self.restore_session(session_id)
         else {
             return false;
         };
@@ -314,6 +351,7 @@ impl Adapter {
                 model_id,
                 cwd,
                 additional_directories,
+                mode_id,
             },
         );
         true
@@ -359,9 +397,10 @@ impl Adapter {
                 model_id: None,
                 cwd: cwd_opt,
                 additional_directories: additional_dirs,
+                mode_id: None,
             },
         );
-        let result = self.session_config_result_json(&session_id, None);
+        let result = self.session_config_result_json(&session_id, None, None);
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -441,7 +480,11 @@ impl Adapter {
                 .sessions
                 .get(session_id)
                 .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let mode_id = self
+                .sessions
+                .get(session_id)
+                .and_then(|s| s.mode_id.clone());
+            let result = self.session_config_result_json(session_id, model_id.as_deref(), mode_id.as_deref());
             serde_json::to_string(&JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -474,7 +517,11 @@ impl Adapter {
                 .sessions
                 .get(session_id)
                 .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let mode_id = self
+                .sessions
+                .get(session_id)
+                .and_then(|s| s.mode_id.clone());
+            let result = self.session_config_result_json(session_id, model_id.as_deref(), mode_id.as_deref());
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -542,6 +589,57 @@ impl Adapter {
             jsonrpc: "2.0",
             id,
             result: Some(json!({})),
+            error: None,
+        }
+    }
+
+    pub fn handle_session_set_mode(&mut self, id: Value, params: &Value) -> JsonRpcResponse {
+        let session_id = params.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+        let mode_id = params.get("modeId").and_then(|v| v.as_str()).unwrap_or("");
+
+        if session_id.is_empty() || mode_id.is_empty() {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code":-32602,"message":"missing sessionId or modeId"})),
+            };
+        }
+
+        if !self.sessions.contains_key(session_id) {
+            let _ = self.restore_session_state(session_id);
+        }
+
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({
+                    "code": -32000,
+                    "message": format!("unknown sessionId: {session_id}"),
+                })),
+            };
+        };
+
+        session.mode_id = Some(mode_id.to_string());
+        let last_step_idx = session.last_step_idx;
+        let conv_id = session.conversation_id.clone();
+        let model_id_str = session.model_id.clone();
+
+        self.persist_session(
+            session_id,
+            conv_id.as_deref(),
+            last_step_idx,
+            model_id_str.as_deref(),
+        );
+
+        let result = self.session_config_result_json(session_id, model_id_str.as_deref(), Some(mode_id));
+
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
             error: None,
         }
     }
@@ -654,6 +752,19 @@ impl Adapter {
         }
 
         if let Some(session) = self.sessions.get(session_id) {
+            if let Some(mode) = &session.mode_id {
+                if mode != "default" {
+                    if mode == "yolo" {
+                        args.push("--dangerously-skip-permissions".to_string());
+                    } else if mode == "accept-edits" || mode == "auto-approve" {
+                        args.push("--mode".to_string());
+                        args.push("accept-edits".to_string());
+                    } else {
+                        args.push("--mode".to_string());
+                        args.push(mode.clone());
+                    }
+                }
+            }
             if let Some(conv_id) = &session.conversation_id {
                 args.push("--conversation".to_string());
                 args.push(conv_id.clone());

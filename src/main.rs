@@ -213,6 +213,11 @@ async fn main() {
                 let mut adapter = adapter.lock().await;
                 vec![serde_json::to_string(&adapter.handle_session_set_model(id, &params)).unwrap()]
             }
+            Some("session/set_mode") | Some("session/setMode") => {
+                let params = req.params.unwrap_or(json!({}));
+                let mut adapter = adapter.lock().await;
+                vec![serde_json::to_string(&adapter.handle_session_set_mode(id, &params)).unwrap()]
+            }
             Some("session/set_config_option") | Some("session/setConfigOption") => {
                 let params = req.params.unwrap_or(json!({}));
                 let mut adapter = adapter.lock().await;

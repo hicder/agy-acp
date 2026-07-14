@@ -909,6 +909,7 @@ fn test_session_resume_accepts_in_memory_session() {
             model_id: None,
             cwd: None,
             additional_directories: vec![],
+            mode_id: None,
         },
     );
 
@@ -943,6 +944,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
             model_id: None,
             cwd: None,
             additional_directories: vec![],
+            mode_id: None,
         },
     );
 
@@ -1056,15 +1058,16 @@ fn test_persist_and_restore_session() {
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
     let restored = adapter.restore_session("sess-1");
-    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None, None, vec![])));
+    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None, None, vec![], None)));
 
-    // Test persistence with cwd and additional_directories
+    // Test persistence with cwd and additional_directories and mode_id
     adapter.sessions.insert("sess-2".to_string(), crate::types::Session {
         conversation_id: Some("conv-def".to_string()),
         last_step_idx: 12,
         model_id: Some("gpt-4".to_string()),
         cwd: Some("/path/to/cwd".to_string()),
         additional_directories: vec!["/path/a".to_string(), "/path/b".to_string()],
+        mode_id: Some("plan".to_string()),
     });
     adapter.persist_session("sess-2", Some("conv-def"), 12, Some("gpt-4"));
     let restored2 = adapter.restore_session("sess-2");
@@ -1073,7 +1076,8 @@ fn test_persist_and_restore_session() {
         12,
         Some("gpt-4".to_string()),
         Some("/path/to/cwd".to_string()),
-        vec!["/path/a".to_string(), "/path/b".to_string()]
+        vec!["/path/a".to_string(), "/path/b".to_string()],
+        Some("plan".to_string()),
     )));
 
     let missing = adapter.restore_session("sess-unknown");
@@ -1868,7 +1872,8 @@ fn test_session_set_model_persists() {
             0,
             Some("Claude Opus 4.6 (Thinking)".to_string()),
             None,
-            vec![]
+            vec![],
+            None
         ))
     );
 
@@ -1886,6 +1891,7 @@ fn test_session_load_returns_models() {
             model_id: Some("Gemini 3.1 Pro (High)".to_string()),
             cwd: None,
             additional_directories: vec![],
+            mode_id: None,
         },
     );
     adapter.persist_session(
@@ -2008,6 +2014,7 @@ fn test_build_agy_args() {
         model_id: None,
         cwd: None,
         additional_directories: vec![],
+        mode_id: None,
     });
     let (args2, run_dir2) = adapter.build_agy_args("sess-empty", "hello prompt");
     assert_eq!(run_dir2, "/default/workdir");
@@ -2023,6 +2030,7 @@ fn test_build_agy_args() {
             "/another/library".to_string(),
             "/dependency/repo".to_string(),
         ],
+        mode_id: None,
     });
     let (args3, run_dir3) = adapter.build_agy_args("sess-full", "hello prompt");
     assert_eq!(run_dir3, "/custom/cwd");
@@ -2049,6 +2057,7 @@ fn test_build_agy_args() {
         model_id: None,
         cwd: None,
         additional_directories: vec!["/another/library".to_string()],
+        mode_id: None,
     });
     let (args4, run_dir4) = adapter.build_agy_args("sess-fallback", "hello prompt");
     assert_eq!(run_dir4, "/default/workdir");
@@ -2094,5 +2103,109 @@ fn test_handle_session_new_with_directories() {
             "/path/to/dep2".to_string()
         ]
     );
+}
+
+#[test]
+fn test_session_set_mode() {
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: "/default/workdir".to_string(),
+        conversations_dir: PathBuf::from("/tmp/convs"),
+        state_file: PathBuf::from("/tmp/state.json"),
+        available_models: vec![],
+        skip_naration: false,
+    };
+
+    adapter.sessions.insert(
+        "sess-test".to_string(),
+        crate::types::Session {
+            conversation_id: None,
+            last_step_idx: -1,
+            model_id: None,
+            cwd: None,
+            additional_directories: vec![],
+            mode_id: None,
+        },
+    );
+
+    // Set default mode
+    let resp1 = adapter.handle_session_set_mode(
+        json!(1),
+        &json!({
+            "sessionId": "sess-test",
+            "modeId": "default"
+        })
+    );
+    assert!(resp1.error.is_none());
+    let res1 = resp1.result.unwrap();
+    assert_eq!(res1.get("currentModeId").unwrap().as_str().unwrap(), "default");
+    
+    let (args1, _) = adapter.build_agy_args("sess-test", "prompt");
+    // Verify "default" does not inject mode flags
+    assert!(!args1.contains(&"--mode".to_string()));
+    assert!(!args1.contains(&"--dangerously-skip-permissions".to_string()));
+
+    // Set plan mode
+    let resp2 = adapter.handle_session_set_mode(
+        json!(2),
+        &json!({
+            "sessionId": "sess-test",
+            "modeId": "plan"
+        })
+    );
+    assert!(resp2.error.is_none());
+    let res2 = resp2.result.unwrap();
+    assert_eq!(res2.get("currentModeId").unwrap().as_str().unwrap(), "plan");
+
+    let (args2, _) = adapter.build_agy_args("sess-test", "prompt");
+    assert_eq!(args2[2], "--mode");
+    assert_eq!(args2[3], "plan");
+
+    // Set accept-edits mode
+    let resp3 = adapter.handle_session_set_mode(
+        json!(3),
+        &json!({
+            "sessionId": "sess-test",
+            "modeId": "accept-edits"
+        })
+    );
+    assert!(resp3.error.is_none());
+    let res3 = resp3.result.unwrap();
+    assert_eq!(res3.get("currentModeId").unwrap().as_str().unwrap(), "accept-edits");
+
+    let (args3, _) = adapter.build_agy_args("sess-test", "prompt");
+    assert_eq!(args3[2], "--mode");
+    assert_eq!(args3[3], "accept-edits");
+
+    // Set auto-approve mode (alias of accept-edits)
+    let resp4 = adapter.handle_session_set_mode(
+        json!(4),
+        &json!({
+            "sessionId": "sess-test",
+            "modeId": "auto-approve"
+        })
+    );
+    assert!(resp4.error.is_none());
+    let res4 = resp4.result.unwrap();
+    assert_eq!(res4.get("currentModeId").unwrap().as_str().unwrap(), "auto-approve");
+
+    let (args4, _) = adapter.build_agy_args("sess-test", "prompt");
+    assert_eq!(args4[2], "--mode");
+    assert_eq!(args4[3], "accept-edits");
+
+    // Set yolo mode
+    let resp5 = adapter.handle_session_set_mode(
+        json!(5),
+        &json!({
+            "sessionId": "sess-test",
+            "modeId": "yolo"
+        })
+    );
+    assert!(resp5.error.is_none());
+    let res5 = resp5.result.unwrap();
+    assert_eq!(res5.get("currentModeId").unwrap().as_str().unwrap(), "yolo");
+
+    let (args5, _) = adapter.build_agy_args("sess-test", "prompt");
+    assert_eq!(args5[2], "--dangerously-skip-permissions");
 }
 

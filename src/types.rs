@@ -45,6 +45,8 @@ pub struct StoredSession {
     pub cwd: Option<String>,
     #[serde(default)]
     pub additional_directories: Vec<String>,
+    #[serde(default)]
+    pub mode_id: Option<String>,
 }
 
 pub struct Session {
@@ -55,6 +57,7 @@ pub struct Session {
     pub model_id: Option<String>,
     pub cwd: Option<String>,
     pub additional_directories: Vec<String>,
+    pub mode_id: Option<String>,
 }
 
 #[cfg(test)]
