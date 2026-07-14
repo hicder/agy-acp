@@ -546,7 +546,7 @@ fn test_session_load_restores_persisted_session() {
         available_models: vec![],
         skip_naration: false,
     };
-    adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
+    adapter.persist_session("sess-1", Some("conv-abc"), 5, None, None);
 
     let output = adapter.handle_session_load(json!(7), &json!({"sessionId": "sess-1"}));
     let response: Value = serde_json::from_str(output.last().unwrap()).unwrap();
@@ -694,7 +694,7 @@ fn test_session_load_replays_conversation_history() {
         available_models: vec![],
         skip_naration: false,
     };
-    adapter.persist_session("sess-replay", Some("conv-replay"), 9, None);
+    adapter.persist_session("sess-replay", Some("conv-replay"), 9, None, None);
 
     let output = adapter.handle_session_load(json!(1), &json!({"sessionId": "sess-replay"}));
 
@@ -820,7 +820,7 @@ fn test_session_resume_restores_persisted_session() {
         available_models: vec![],
         skip_naration: false,
     };
-    adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
+    adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None, None);
 
     let response = adapter.handle_session_resume(json!(10), &json!({"sessionId": "sess-r1"}));
     assert!(response.error.is_none());
@@ -907,6 +907,7 @@ fn test_session_resume_accepts_in_memory_session() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            mode_id: None,
         },
     );
 
@@ -939,6 +940,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            mode_id: None,
         },
     );
 
@@ -964,7 +966,7 @@ fn test_session_resume_does_not_replay_history() {
         available_models: vec![],
         skip_naration: false,
     };
-    adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
+    adapter.persist_session("sess-nr", Some("conv-nr"), 10, None, None);
 
     let response = adapter.handle_session_resume(json!(13), &json!({"sessionId": "sess-nr"}));
     assert!(response.error.is_none());
@@ -1050,9 +1052,9 @@ fn test_persist_and_restore_session() {
         skip_naration: false,
     };
 
-    adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
+    adapter.persist_session("sess-1", Some("conv-abc"), 7, None, None);
     let restored = adapter.restore_session("sess-1");
-    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None)));
+    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None, None)));
 
     let missing = adapter.restore_session("sess-unknown");
     assert_eq!(missing, None);
@@ -1796,7 +1798,7 @@ fn test_session_set_model_persists() {
         skip_naration: false,
     };
 
-    adapter.persist_session("sess-m1", Some("conv-m1"), 0, None);
+    adapter.persist_session("sess-m1", Some("conv-m1"), 0, None, None);
 
     adapter.restore_session_state("sess-m1");
     adapter.handle_session_set_model(
@@ -1818,7 +1820,8 @@ fn test_session_set_model_persists() {
         Some((
             "conv-m1".to_string(),
             0,
-            Some("Claude Opus 4.6 (Thinking)".to_string())
+            Some("Claude Opus 4.6 (Thinking)".to_string()),
+            None
         ))
     );
 
@@ -1834,6 +1837,7 @@ fn test_session_load_returns_models() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: Some("Gemini 3.1 Pro (High)".to_string()),
+            mode_id: None,
         },
     );
     adapter.persist_session(
@@ -1841,6 +1845,7 @@ fn test_session_load_returns_models() {
         Some("conv-load"),
         -1,
         Some("Gemini 3.1 Pro (High)"),
+        None,
     );
     adapter.sessions.clear();
 
@@ -1870,6 +1875,7 @@ fn test_session_resume_returns_models() {
         Some("conv-resume"),
         -1,
         Some("GPT-OSS 120B (Medium)"),
+        None,
     );
     adapter.sessions.clear();
 

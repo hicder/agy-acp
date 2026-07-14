@@ -41,6 +41,9 @@ pub struct StoredSession {
     /// Selected model ID for this session.
     #[serde(default)]
     pub model_id: Option<String>,
+    /// Selected mode ID for this session.
+    #[serde(default)]
+    pub mode_id: Option<String>,
 }
 
 pub struct Session {
@@ -49,6 +52,8 @@ pub struct Session {
     pub last_step_idx: i64,
     /// Selected model ID for this session.
     pub model_id: Option<String>,
+    /// Selected mode ID for this session.
+    pub mode_id: Option<String>,
 }
 
 #[cfg(test)]
