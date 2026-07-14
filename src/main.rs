@@ -141,8 +141,9 @@ async fn main() {
                 vec![serde_json::to_string(&adapter.handle_initialize(id)).unwrap()]
             }
             Some("session/new") => {
+                let params = req.params.unwrap_or(json!({}));
                 let mut adapter = adapter.lock().await;
-                vec![serde_json::to_string(&adapter.handle_session_new(id)).unwrap()]
+                vec![serde_json::to_string(&adapter.handle_session_new(id, &params)).unwrap()]
             }
             Some("session/load") => {
                 let params = req.params.unwrap_or(json!({}));

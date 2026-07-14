@@ -213,10 +213,11 @@ pub fn extract_printable_strings(blob: &[u8]) -> Vec<String> {
 }
 
 fn looks_like_tool_name(s: &str) -> bool {
-    s.len() >= 2
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && (s.contains('_') || s.chars().any(|c| c.is_ascii_uppercase()))
-        && s.len() <= 64
+    s == "thinking"
+        || (s.len() >= 2
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && (s.contains('_') || s.chars().any(|c| c.is_ascii_uppercase()))
+            && s.len() <= 64)
 }
 
 pub fn extract_tool_name(s: &str) -> Option<String> {

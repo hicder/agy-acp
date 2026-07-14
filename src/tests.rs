@@ -749,7 +749,7 @@ fn test_session_load_replays_conversation_history() {
         .filter(|notification| {
             matches!(
                 notification["params"]["update"]["sessionUpdate"].as_str(),
-                Some("user_message_chunk") | Some("agent_message_chunk")
+                Some("user_message_chunk") | Some("agent_message_chunk") | Some("agent_thought_chunk")
             )
         })
         .collect();
@@ -907,6 +907,8 @@ fn test_session_resume_accepts_in_memory_session() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            cwd: None,
+            additional_directories: vec![],
         },
     );
 
@@ -939,6 +941,8 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            cwd: None,
+            additional_directories: vec![],
         },
     );
 
@@ -1041,7 +1045,7 @@ fn test_persist_and_restore_session() {
     let root = std::env::temp_dir().join(format!("agy-acp-state-{}", Uuid::new_v4()));
     let _ = fs::create_dir_all(&root);
 
-    let adapter = Adapter {
+    let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
         conversations_dir: root.join("conversations"),
@@ -1052,7 +1056,25 @@ fn test_persist_and_restore_session() {
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
     let restored = adapter.restore_session("sess-1");
-    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None)));
+    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None, None, vec![])));
+
+    // Test persistence with cwd and additional_directories
+    adapter.sessions.insert("sess-2".to_string(), crate::types::Session {
+        conversation_id: Some("conv-def".to_string()),
+        last_step_idx: 12,
+        model_id: Some("gpt-4".to_string()),
+        cwd: Some("/path/to/cwd".to_string()),
+        additional_directories: vec!["/path/a".to_string(), "/path/b".to_string()],
+    });
+    adapter.persist_session("sess-2", Some("conv-def"), 12, Some("gpt-4"));
+    let restored2 = adapter.restore_session("sess-2");
+    assert_eq!(restored2, Some((
+        "conv-def".to_string(),
+        12,
+        Some("gpt-4".to_string()),
+        Some("/path/to/cwd".to_string()),
+        vec!["/path/a".to_string(), "/path/b".to_string()]
+    )));
 
     let missing = adapter.restore_session("sess-unknown");
     assert_eq!(missing, None);
@@ -1116,7 +1138,7 @@ fn test_read_response_from_db() {
     };
 
     let result = adapter.read_response_from_db("test-conv", -1);
-    assert_eq!(result, Some(("hello world".to_string(), 1)));
+    assert_eq!(result, Some(("hello world".to_string(), 2)));
 
     let result = adapter.read_response_from_db("test-conv", 1);
     assert_eq!(result, None);
@@ -1673,7 +1695,7 @@ fn test_filter_narration_all_narration_drops_all() {
 #[test]
 fn test_session_new_returns_models() {
     let mut adapter = Adapter::new();
-    let response = adapter.handle_session_new(json!(1));
+    let response = adapter.handle_session_new(json!(1), &json!({}));
     let result = response.result.as_ref().unwrap();
     assert!(result.get("sessionId").is_some());
     let models = result.get("models").unwrap();
@@ -1689,9 +1711,35 @@ fn test_session_new_returns_models() {
 }
 
 #[test]
+fn test_session_new_with_cwd() {
+    let mut adapter = Adapter::new();
+    let original_cwd = adapter.working_dir.clone();
+    let target_cwd = "/dummy/path/for/cwd/test";
+    
+    let response = adapter.handle_session_new(json!(1), &json!({
+        "cwd": target_cwd
+    }));
+    assert!(response.result.is_some());
+    assert_eq!(adapter.working_dir, target_cwd);
+    assert_ne!(adapter.working_dir, original_cwd);
+}
+
+#[test]
+fn test_session_new_without_cwd() {
+    let mut adapter = Adapter::new();
+    let original_cwd = adapter.working_dir.clone();
+    
+    let response = adapter.handle_session_new(json!(1), &json!({
+        "other_param": "value"
+    }));
+    assert!(response.result.is_some());
+    assert_eq!(adapter.working_dir, original_cwd);
+}
+
+#[test]
 fn test_session_set_model() {
     let mut adapter = Adapter::new();
-    let new_resp = adapter.handle_session_new(json!(1));
+    let new_resp = adapter.handle_session_new(json!(1), &json!({}));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
         .as_str()
         .unwrap()
@@ -1736,7 +1784,7 @@ fn test_session_set_model_unknown_session() {
 fn test_session_set_config_option_sets_model() {
     let mut adapter = Adapter::new();
     adapter.available_models = vec!["Model A".to_string(), "Model B".to_string()];
-    let new_resp = adapter.handle_session_new(json!(1));
+    let new_resp = adapter.handle_session_new(json!(1), &json!({}));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
         .as_str()
         .unwrap()
@@ -1766,7 +1814,7 @@ fn test_session_set_config_option_sets_model() {
 #[test]
 fn test_session_set_config_option_rejects_unknown_config() {
     let mut adapter = Adapter::new();
-    let new_resp = adapter.handle_session_new(json!(1));
+    let new_resp = adapter.handle_session_new(json!(1), &json!({}));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
         .as_str()
         .unwrap()
@@ -1818,7 +1866,9 @@ fn test_session_set_model_persists() {
         Some((
             "conv-m1".to_string(),
             0,
-            Some("Claude Opus 4.6 (Thinking)".to_string())
+            Some("Claude Opus 4.6 (Thinking)".to_string()),
+            None,
+            vec![]
         ))
     );
 
@@ -1834,6 +1884,8 @@ fn test_session_load_returns_models() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: Some("Gemini 3.1 Pro (High)".to_string()),
+            cwd: None,
+            additional_directories: vec![],
         },
     );
     adapter.persist_session(
@@ -1926,3 +1978,121 @@ fn test_session_config_options_json_with_model() {
     assert_eq!(options[0]["value"].as_str(), Some("Model A"));
     assert_eq!(options[1]["value"].as_str(), Some("Model B"));
 }
+
+#[test]
+fn test_build_agy_args() {
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: "/default/workdir".to_string(),
+        conversations_dir: PathBuf::from("/tmp/convs"),
+        state_file: PathBuf::from("/tmp/state.json"),
+        available_models: vec![],
+        skip_naration: false,
+    };
+
+    // Test with missing session (fallback to default)
+    let (args1, run_dir1) = adapter.build_agy_args("nonexistent", "hello prompt");
+    assert_eq!(run_dir1, "/default/workdir");
+    let expected_args1 = vec![
+        "--add-dir".to_string(),
+        "/default/workdir".to_string(),
+        "-p".to_string(),
+        "hello prompt".to_string(),
+    ];
+    assert_eq!(args1, expected_args1);
+
+    // Test with session but no cwd or additional_dirs
+    adapter.sessions.insert("sess-empty".to_string(), crate::types::Session {
+        conversation_id: None,
+        last_step_idx: -1,
+        model_id: None,
+        cwd: None,
+        additional_directories: vec![],
+    });
+    let (args2, run_dir2) = adapter.build_agy_args("sess-empty", "hello prompt");
+    assert_eq!(run_dir2, "/default/workdir");
+    assert_eq!(args2, expected_args1);
+
+    // Test with session containing cwd and additional_dirs
+    adapter.sessions.insert("sess-full".to_string(), crate::types::Session {
+        conversation_id: Some("conv-123".to_string()),
+        last_step_idx: 5,
+        model_id: Some("my-model".to_string()),
+        cwd: Some("/custom/cwd".to_string()),
+        additional_directories: vec![
+            "/another/library".to_string(),
+            "/dependency/repo".to_string(),
+        ],
+    });
+    let (args3, run_dir3) = adapter.build_agy_args("sess-full", "hello prompt");
+    assert_eq!(run_dir3, "/custom/cwd");
+    let expected_args3 = vec![
+        "--add-dir".to_string(),
+        "/custom/cwd".to_string(),
+        "--add-dir".to_string(),
+        "/another/library".to_string(),
+        "--add-dir".to_string(),
+        "/dependency/repo".to_string(),
+        "--conversation".to_string(),
+        "conv-123".to_string(),
+        "--model".to_string(),
+        "my-model".to_string(),
+        "-p".to_string(),
+        "hello prompt".to_string(),
+    ];
+    assert_eq!(args3, expected_args3);
+
+    // Test with session containing additional_dirs but NO cwd (fallback)
+    adapter.sessions.insert("sess-fallback".to_string(), crate::types::Session {
+        conversation_id: None,
+        last_step_idx: -1,
+        model_id: None,
+        cwd: None,
+        additional_directories: vec!["/another/library".to_string()],
+    });
+    let (args4, run_dir4) = adapter.build_agy_args("sess-fallback", "hello prompt");
+    assert_eq!(run_dir4, "/default/workdir");
+    let expected_args4 = vec![
+        "--add-dir".to_string(),
+        "/default/workdir".to_string(),
+        "--add-dir".to_string(),
+        "/another/library".to_string(),
+        "-p".to_string(),
+        "hello prompt".to_string(),
+    ];
+    assert_eq!(args4, expected_args4);
+}
+
+#[test]
+fn test_handle_session_new_with_directories() {
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: "/default/workdir".to_string(),
+        conversations_dir: PathBuf::from("/tmp/convs"),
+        state_file: PathBuf::from("/tmp/state.json"),
+        available_models: vec![],
+        skip_naration: false,
+    };
+
+    let params = json!({
+        "cwd": "/new/workspace/cwd",
+        "additional_directories": [
+            "/path/to/dep1",
+            "/path/to/dep2"
+        ]
+    });
+
+    let _resp = adapter.handle_session_new(json!(1), &params);
+    assert_eq!(adapter.working_dir, "/new/workspace/cwd");
+    assert_eq!(adapter.sessions.len(), 1);
+    let session = adapter.sessions.values().next().unwrap();
+    assert_eq!(session.cwd, Some("/new/workspace/cwd".to_string()));
+    assert_eq!(
+        session.additional_directories,
+        vec![
+            "/path/to/dep1".to_string(),
+            "/path/to/dep2".to_string()
+        ]
+    );
+}
+
