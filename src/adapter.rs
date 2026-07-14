@@ -162,12 +162,12 @@ impl Adapter {
     }
 
     /// Try to restore conversation_id, last_step_idx, and model_id from persisted state.
-    pub fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>)> {
+    pub fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>, Option<String>, Vec<String>)> {
         let store = self.load_store();
         store.sessions.get(session_id).and_then(|s| {
             s.conversation_id
                 .clone()
-                .map(|cid| (cid, s.last_step_idx, s.model_id.clone()))
+                .map(|cid| (cid, s.last_step_idx, s.model_id.clone(), s.cwd.clone(), s.additional_directories.clone()))
         })
     }
 
@@ -183,12 +183,21 @@ impl Adapter {
             return;
         };
         let mut store = self.load_store_inner();
+        let (cwd, additional_directories) = if let Some(s) = self.sessions.get(session_id) {
+            (s.cwd.clone(), s.additional_directories.clone())
+        } else if let Some(old) = store.sessions.get(session_id) {
+            (old.cwd.clone(), old.additional_directories.clone())
+        } else {
+            (None, Vec::new())
+        };
         store.sessions.insert(
             session_id.to_string(),
             StoredSession {
                 conversation_id: conversation_id.map(String::from),
                 last_step_idx,
                 model_id: model_id.map(String::from),
+                cwd,
+                additional_directories,
             },
         );
         let tmp = self.state_file.with_extension("tmp");
@@ -290,7 +299,7 @@ impl Adapter {
     }
 
     pub fn restore_session_state(&mut self, session_id: &str) -> bool {
-        let Some((conversation_id, last_step_idx, model_id)) = self.restore_session(session_id)
+        let Some((conversation_id, last_step_idx, model_id, cwd, additional_directories)) = self.restore_session(session_id)
         else {
             return false;
         };
@@ -303,6 +312,8 @@ impl Adapter {
                 conversation_id: Some(conversation_id),
                 last_step_idx,
                 model_id,
+                cwd,
+                additional_directories,
             },
         );
         true
@@ -326,9 +337,18 @@ impl Adapter {
     }
 
     pub fn handle_session_new(&mut self, id: Value, params: &Value) -> JsonRpcResponse {
+        let mut cwd_opt = None;
         if let Some(cwd) = params.get("cwd").and_then(|v| v.as_str()) {
             self.working_dir = cwd.to_string();
+            cwd_opt = Some(cwd.to_string());
         }
+        let additional_dirs = if let Some(arr) = params.get("additional_directories").and_then(|v| v.as_array()) {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>()
+        } else {
+            Vec::new()
+        };
         let session_id = Uuid::new_v4().to_string();
         self.evict_if_needed();
         self.sessions.insert(
@@ -337,6 +357,8 @@ impl Adapter {
                 conversation_id: None,
                 last_step_idx: -1,
                 model_id: None,
+                cwd: cwd_opt,
+                additional_directories: additional_dirs,
             },
         );
         let result = self.session_config_result_json(&session_id, None);
@@ -599,6 +621,55 @@ impl Adapter {
         }
     }
 
+    pub fn build_agy_args(
+        &self,
+        session_id: &str,
+        clean_prompt: &str,
+    ) -> (Vec<String>, String) {
+        let mut args: Vec<String> = Vec::new();
+        let mut add_dirs = Vec::new();
+        let mut run_dir = self.working_dir.clone();
+
+        if let Some(session) = self.sessions.get(session_id) {
+            if let Some(cwd) = &session.cwd {
+                add_dirs.push(cwd.clone());
+                run_dir = cwd.clone();
+            } else {
+                add_dirs.push(self.working_dir.clone());
+            }
+            for dir in &session.additional_directories {
+                add_dirs.push(dir.clone());
+            }
+        } else {
+            add_dirs.push(self.working_dir.clone());
+        }
+
+        for dir in add_dirs {
+            args.push("--add-dir".to_string());
+            args.push(dir);
+        }
+
+        if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
+            args.extend(extra.split_whitespace().map(String::from));
+        }
+
+        if let Some(session) = self.sessions.get(session_id) {
+            if let Some(conv_id) = &session.conversation_id {
+                args.push("--conversation".to_string());
+                args.push(conv_id.clone());
+            }
+            if let Some(model_id) = &session.model_id {
+                args.push("--model".to_string());
+                args.push(model_id.clone());
+            }
+        }
+
+        args.push("-p".to_string());
+        args.push(clean_prompt.to_string());
+
+        (args, run_dir)
+    }
+
     pub async fn handle_session_prompt(
         &mut self,
         id: Value,
@@ -637,29 +708,12 @@ impl Adapter {
             None
         };
 
-        let mut args: Vec<String> = Vec::new();
-        args.push("--add-dir".to_string());
-        args.push(self.working_dir.clone());
-        if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
-            args.extend(extra.split_whitespace().map(String::from));
-        }
-        if let Some(session) = self.sessions.get(session_id) {
-            if let Some(conv_id) = &session.conversation_id {
-                args.push("--conversation".to_string());
-                args.push(conv_id.clone());
-            }
-            if let Some(model_id) = &session.model_id {
-                args.push("--model".to_string());
-                args.push(model_id.clone());
-            }
-        }
-        args.push("-p".to_string());
-        args.push(clean_prompt.to_string());
+        let (args, run_dir) = self.build_agy_args(session_id, clean_prompt);
 
         let spawn_result = Command::new("agy")
              .args(&args)
-             .current_dir(&self.working_dir)
-             .env("PWD", &self.working_dir)
+             .current_dir(&run_dir)
+             .env("PWD", &run_dir)
              .stdin(std::process::Stdio::null())
              .stdout(std::process::Stdio::piped())
              .stderr(std::process::Stdio::piped())

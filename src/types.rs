@@ -41,6 +41,10 @@ pub struct StoredSession {
     /// Selected model ID for this session.
     #[serde(default)]
     pub model_id: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub additional_directories: Vec<String>,
 }
 
 pub struct Session {
@@ -49,6 +53,8 @@ pub struct Session {
     pub last_step_idx: i64,
     /// Selected model ID for this session.
     pub model_id: Option<String>,
+    pub cwd: Option<String>,
+    pub additional_directories: Vec<String>,
 }
 
 #[cfg(test)]
