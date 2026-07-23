@@ -295,6 +295,30 @@ fn test_extract_tool_update_from_bash_tool() {
 }
 
 #[test]
+fn test_is_tool_step_type_includes_previously_unhandled_types() {
+    for step_type in [28, 31, 38, 127, 132] {
+        assert!(is_tool_step_type(step_type), "step_type {step_type} should be recognized as a tool step");
+    }
+    for step_type in [90, 98] {
+        assert!(!is_tool_step_type(step_type), "step_type {step_type} is a message envelope, not a tool step");
+    }
+}
+
+#[test]
+fn test_extract_tool_update_from_mcp_tool_call_step() {
+    let payload = br#"
+        call_mcp_tool
+        {"Arguments":{},"ServerName":"things","ToolName":"get_projects","toolAction":"Getting projects from Things app","toolSummary":"Get Things projects"}
+    "#;
+
+    assert!(is_tool_step_type(38));
+    let update = extract_tool_update_from_step_payload(4, 38, payload).unwrap();
+    assert_eq!(update["sessionUpdate"], "tool_call");
+    assert_eq!(update["toolCallId"], "agy-4-38");
+    assert_eq!(update["title"], "Get Things projects");
+}
+
+#[test]
 fn test_extract_tool_update_from_web_search_step() {
     let payload = br#"
         search_web
