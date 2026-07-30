@@ -45,6 +45,72 @@ pub fn new_conversation_id_in_dir(
     Some(created.remove(0).clone())
 }
 
+/// Resolve the conversation id owned by a running `agy` process by inspecting
+/// open file descriptors for a `*.db` under `conversations_dir`.
+///
+/// Linux uses `/proc/{pid}/fd`; macOS uses `lsof -p <pid> -Fn`.
+pub fn find_conversation_id_by_pid(pid: u32, conversations_dir: &Path) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let fd_dir = format!("/proc/{}/fd", pid);
+        if let Ok(entries) = std::fs::read_dir(fd_dir) {
+            let conversations_dir_canonical = conversations_dir
+                .canonicalize()
+                .unwrap_or_else(|_| conversations_dir.to_path_buf());
+            for entry in entries.filter_map(|e| e.ok()) {
+                if let Ok(target) = std::fs::read_link(entry.path()) {
+                    if target.extension().map(|ext| ext == "db").unwrap_or(false) {
+                        if let Some(parent) = target.parent() {
+                            let target_parent = parent
+                                .canonicalize()
+                                .unwrap_or_else(|_| parent.to_path_buf());
+                            if target_parent == conversations_dir_canonical {
+                                if let Some(stem) = target.file_stem() {
+                                    return Some(stem.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("lsof")
+            .args(["-p", &pid.to_string(), "-Fn"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let conversations_dir_canonical = conversations_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| conversations_dir.to_path_buf());
+                for line in stdout.lines() {
+                    if let Some(path_str) = line.strip_prefix('n') {
+                        let path = Path::new(path_str);
+                        if path.extension().map(|ext| ext == "db").unwrap_or(false) {
+                            if let Some(parent) = path.parent() {
+                                let target_parent = parent
+                                    .canonicalize()
+                                    .unwrap_or_else(|_| parent.to_path_buf());
+                                if target_parent == conversations_dir_canonical {
+                                    if let Some(stem) = path.file_stem() {
+                                        return Some(stem.to_string_lossy().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 pub fn read_rows_from_db(
     conversations_dir: &Path,
     conversation_id: &str,

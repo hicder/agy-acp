@@ -892,6 +892,7 @@ impl Adapter {
             emitted_tool_steps: HashSet::new(),
             last_title: None,
             skip_naration: self.skip_naration,
+            child_pid: child.id(),
         }));
         let stop_polling = Arc::new(AtomicBool::new(false));
         let poll_conversations_dir = self.conversations_dir.clone();

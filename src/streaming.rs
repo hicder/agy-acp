@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::adapter::is_narration;
-use crate::db::{new_conversation_id_in_dir, read_rows_from_db};
+use crate::db::{find_conversation_id_by_pid, new_conversation_id_in_dir, read_rows_from_db};
 use crate::protobuf::{
     extract_text_from_step_payload, extract_thought_from_step_payload,
     extract_title_from_step_payload, extract_tool_update_from_step_payload, is_tool_step_type,
@@ -20,8 +20,15 @@ pub fn poll_streaming_delta(
     let (conversation_id, base_step_idx) = {
         let mut guard = state.lock().unwrap();
         if guard.conversation_id.is_none() {
-            if let Some(before) = snapshot {
-                guard.conversation_id = new_conversation_id_in_dir(conversations_dir, before);
+            // Prefer binding via the child's open conversation DB FD when available;
+            // fall back to directory snapshot diff for newly created conversations.
+            if let Some(pid) = guard.child_pid {
+                guard.conversation_id = find_conversation_id_by_pid(pid, conversations_dir);
+            }
+            if guard.conversation_id.is_none() {
+                if let Some(before) = snapshot {
+                    guard.conversation_id = new_conversation_id_in_dir(conversations_dir, before);
+                }
             }
         }
         (guard.conversation_id.clone(), guard.base_step_idx)

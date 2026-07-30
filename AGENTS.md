@@ -52,7 +52,7 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 - State persistence uses write-to-tmp-then-rename pattern under an exclusive file lock (`fs2`).
 - Streaming writes JSON-RPC notifications directly to stdout from a background polling thread (not through the main channel). Both the main loop and the poller write to stdout concurrently.
 - `handle_session_load` returns a `Vec<String>` (multiple notifications + final response), not a single response like other methods.
-- Conversation binding: on first prompt for a new session, the adapter snapshots conversation DB filenames, then diffs after `agy` exits to discover the new conversation ID. Refuses to bind if multiple new DBs appear simultaneously.
+- Conversation binding: while streaming a new session, the poller first tries `find_conversation_id_by_pid` on the spawned `agy` child (Linux `/proc/{pid}/fd`, macOS `lsof -p <pid> -Fn`) to find an open `*.db` under the conversations dir. If that fails, it falls back to snapshotting conversation DB filenames before spawn and diffing afterward. Snapshot fallback refuses to bind if multiple new DBs appear simultaneously.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
 - `session/cancel` is a no-op — always returns `{}`.
 - Both `session/set_model` and `session/setConfigOption` are accepted for model selection.

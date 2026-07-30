@@ -68,4 +68,6 @@ pub struct StreamingState {
     pub emitted_tool_steps: HashSet<i64>,
     pub last_title: Option<String>,
     pub skip_naration: bool,
+    /// OS pid of the spawned `agy` child, used to bind conversation DBs via open FDs.
+    pub child_pid: Option<u32>,
 }
