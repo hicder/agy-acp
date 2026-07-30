@@ -125,16 +125,21 @@ fn get_varint_field(blob: &[u8], target: u64) -> Option<u64> {
 
 /// Extract text from a step_payload protobuf: top-level field 20 (sub-message) → field 1 (string).
 pub fn extract_text_from_step_payload(blob: &[u8]) -> Option<String> {
-    let field_20 = get_proto_field(blob, 20)?;
-    let field_1 = get_proto_field(&field_20, 1)?;
-    String::from_utf8(field_1).ok()
+    get_proto_fields(blob, 20)
+        .into_iter()
+        .rev()
+        .find_map(|field_20| get_proto_field(&field_20, 1))
+        .and_then(|field_1| String::from_utf8(field_1).ok())
 }
 
 /// Extract streamed reasoning text from a step_payload protobuf:
 /// top-level field 20 (sub-message) → field 3 (string).
 pub fn extract_thought_from_step_payload(blob: &[u8]) -> Option<String> {
-    let field_20 = get_proto_field(blob, 20)?;
-    get_text_field(&field_20, 3).filter(|text| !text.trim().is_empty())
+    get_proto_fields(blob, 20)
+        .into_iter()
+        .rev()
+        .find_map(|field_20| get_text_field(&field_20, 3))
+        .filter(|text| !text.trim().is_empty())
 }
 
 pub fn extract_user_text_from_step_payload(blob: &[u8]) -> Option<String> {
