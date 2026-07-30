@@ -56,3 +56,4 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
 - `session/cancel` is a no-op — always returns `{}`.
 - Both `session/set_model` and `session/setConfigOption` are accepted for model selection.
+- Session `configOptions` (priority order): `mode` (`default`|`accept-edits`|`plan` → `--mode`), `model` (`--model`), `effort` (`low`|`medium`|`high` → `--effort`), `sandbox` (`on`/`off` → `--sandbox`), `skip_permissions` (`on`/`off` → `--dangerously-skip-permissions`). Defaults: mode=`default`, effort=`medium`, sandbox/skip off. Legacy `modes` is dual-published beside `configOptions`.

@@ -31,8 +31,6 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    pub const MODEL_CONFIG_ID: &'static str = "model";
-
     pub fn new() -> Self {
         Self::new_with_skip_naration(false)
     }
@@ -195,13 +193,48 @@ impl Adapter {
         })
     }
 
-    /// Build the ACP session config option that Zed uses for its model selector.
-    pub fn session_config_options_json(&mut self, model_id: Option<&str>) -> Value {
+    fn select_option(value: &str, name: &str, description: &str) -> Value {
+        json!({
+            "value": value,
+            "name": name,
+            "description": description,
+        })
+    }
+
+    fn on_off_options() -> Vec<Value> {
+        vec![
+            Self::select_option("off", "Off", "Disabled"),
+            Self::select_option("on", "On", "Enabled"),
+        ]
+    }
+
+    fn parse_on_off(value: &str) -> Option<bool> {
+        match value {
+            "on" | "true" | "1" => Some(true),
+            "off" | "false" | "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Snapshot of config-relevant fields for a session (defaults if missing).
+    fn session_config_snapshot(&self, session_id: &str) -> Session {
+        self.sessions
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Build the full ACP configOptions list for a session.
+    ///
+    /// Order is intentional (ACP priority): mode, model, effort, sandbox, skip_permissions.
+    pub fn session_config_options_json(&mut self, session: &Session) -> Value {
         let models = self.get_available_models();
-        let current = model_id
+        let current_model = session
+            .model_id
+            .as_deref()
             .or_else(|| models.first().map(|s| s.as_str()))
             .unwrap_or("");
-        let options: Vec<Value> = models
+        let model_options: Vec<Value> = models
             .iter()
             .map(|name| {
                 json!({
@@ -210,26 +243,110 @@ impl Adapter {
                 })
             })
             .collect();
-        json!([{
-            "id": Self::MODEL_CONFIG_ID,
-            "name": "Model",
-            "category": "model",
-            "type": "select",
-            "currentValue": current,
-            "options": options,
-        }])
+
+        json!([
+            {
+                "id": CONFIG_ID_MODE,
+                "name": "Mode",
+                "description": "Controls how the agent applies edits and requests review",
+                "category": "mode",
+                "type": "select",
+                "currentValue": session.mode_or_default(),
+                "options": [
+                    Self::select_option(
+                        "default",
+                        "Default",
+                        "Request review before applying file writes"
+                    ),
+                    Self::select_option(
+                        "accept-edits",
+                        "Accept Edits",
+                        "Apply file edits automatically"
+                    ),
+                    Self::select_option(
+                        "plan",
+                        "Plan",
+                        "Plan without applying edits"
+                    ),
+                ],
+            },
+            {
+                "id": CONFIG_ID_MODEL,
+                "name": "Model",
+                "description": "Model used for this session",
+                "category": "model",
+                "type": "select",
+                "currentValue": current_model,
+                "options": model_options,
+            },
+            {
+                "id": CONFIG_ID_EFFORT,
+                "name": "Effort",
+                "description": "Reasoning effort / thinking level",
+                "category": "thought_level",
+                "type": "select",
+                "currentValue": session.effort_or_default(),
+                "options": [
+                    Self::select_option("low", "Low", "Faster, less deliberation"),
+                    Self::select_option("medium", "Medium", "Balanced reasoning effort"),
+                    Self::select_option("high", "High", "Deeper reasoning"),
+                ],
+            },
+            {
+                "id": CONFIG_ID_SANDBOX,
+                "name": "Sandbox",
+                "description": "Run tool commands in the OS sandbox",
+                "category": "_safety",
+                "type": "select",
+                "currentValue": session.sandbox_value(),
+                "options": Self::on_off_options(),
+            },
+            {
+                "id": CONFIG_ID_SKIP_PERMISSIONS,
+                "name": "Skip Permissions",
+                "description": "Auto-approve all tool permission requests (dangerous)",
+                "category": "_safety",
+                "type": "select",
+                "currentValue": session.skip_permissions_value(),
+                "options": Self::on_off_options(),
+            },
+        ])
     }
 
-    pub fn session_config_result_json(
-        &mut self,
-        session_id: &str,
-        model_id: Option<&str>,
-    ) -> Value {
+    pub fn session_config_result_json(&mut self, session_id: &str) -> Value {
+        let session = self.session_config_snapshot(session_id);
+        let model_id = session.model_id.clone();
         json!({
             "sessionId": session_id,
-            "models": self.session_models_json(model_id),
-            "configOptions": self.session_config_options_json(model_id),
+            "models": self.session_models_json(model_id.as_deref()),
+            // Dual-publish legacy modes for clients that do not yet use configOptions.
+            "modes": {
+                "currentModeId": session.mode_or_default(),
+                "availableModes": [
+                    { "id": "default", "name": "Default", "description": "Request review before applying file writes" },
+                    { "id": "accept-edits", "name": "Accept Edits", "description": "Apply file edits automatically" },
+                    { "id": "plan", "name": "Plan", "description": "Plan without applying edits" },
+                ],
+            },
+            "configOptions": self.session_config_options_json(&session),
         })
+    }
+
+    /// Persist the full in-memory session binding.
+    pub fn persist_session_state(&self, session_id: &str, session: &Session) {
+        let Some(_lock) = self.lock_state_file() else {
+            return;
+        };
+        let mut store = self.load_store_inner();
+        store
+            .sessions
+            .insert(session_id.to_string(), session.to_stored());
+        let tmp = self.state_file.with_extension("tmp");
+        if let Ok(file) = fs::File::create(&tmp) {
+            if serde_json::to_writer_pretty(&file, &store).is_ok() {
+                let _ = fs::rename(&tmp, &self.state_file);
+            }
+        }
     }
 
     /// Acquire exclusive lock on a dedicated lock file for read-write mutual exclusion.
@@ -262,17 +379,19 @@ impl Adapter {
         self.load_store_inner()
     }
 
-    /// Try to restore conversation_id, last_step_idx, and model_id from persisted state.
-    pub fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>)> {
+    /// Try to restore a full session from persisted state.
+    ///
+    /// Returns `None` when the session id is unknown. Sessions may exist with
+    /// config only (no conversation yet) after `set_config_option`.
+    pub fn restore_session(&self, session_id: &str) -> Option<Session> {
         let store = self.load_store();
-        store.sessions.get(session_id).and_then(|s| {
-            s.conversation_id
-                .clone()
-                .map(|cid| (cid, s.last_step_idx, s.model_id.clone()))
-        })
+        store.sessions.get(session_id).map(Session::from_stored)
     }
 
     /// Persist a session binding (read-modify-write under single lock).
+    ///
+    /// Preserves existing config fields (mode/effort/sandbox/skip_permissions) when
+    /// the session is already stored and only conversation/model indices change.
     pub fn persist_session(
         &self,
         session_id: &str,
@@ -280,24 +399,20 @@ impl Adapter {
         last_step_idx: i64,
         model_id: Option<&str>,
     ) {
-        let Some(_lock) = self.lock_state_file() else {
-            return;
-        };
-        let mut store = self.load_store_inner();
-        store.sessions.insert(
-            session_id.to_string(),
-            StoredSession {
-                conversation_id: conversation_id.map(String::from),
-                last_step_idx,
-                model_id: model_id.map(String::from),
-            },
-        );
-        let tmp = self.state_file.with_extension("tmp");
-        if let Ok(file) = fs::File::create(&tmp) {
-            if serde_json::to_writer_pretty(&file, &store).is_ok() {
-                let _ = fs::rename(&tmp, &self.state_file);
-            }
-        }
+        let existing = self
+            .sessions
+            .get(session_id)
+            .cloned()
+            .or_else(|| {
+                let store = self.load_store();
+                store.sessions.get(session_id).map(Session::from_stored)
+            })
+            .unwrap_or_default();
+        let mut session = existing;
+        session.conversation_id = conversation_id.map(String::from);
+        session.last_step_idx = last_step_idx;
+        session.model_id = model_id.map(String::from);
+        self.persist_session_state(session_id, &session);
     }
 
     /// Scans the conversations directory for SQLite database files (`*.db`)
@@ -391,21 +506,13 @@ impl Adapter {
     }
 
     pub fn restore_session_state(&mut self, session_id: &str) -> bool {
-        let Some((conversation_id, last_step_idx, model_id)) = self.restore_session(session_id)
-        else {
+        let Some(session) = self.restore_session(session_id) else {
             return false;
         };
         if !self.sessions.contains_key(session_id) {
             self.evict_if_needed();
         }
-        self.sessions.insert(
-            session_id.to_string(),
-            Session {
-                conversation_id: Some(conversation_id),
-                last_step_idx,
-                model_id,
-            },
-        );
+        self.sessions.insert(session_id.to_string(), session);
         true
     }
 
@@ -437,15 +544,8 @@ impl Adapter {
     pub fn handle_session_new(&mut self, id: Value) -> JsonRpcResponse {
         let session_id = Uuid::new_v4().to_string();
         self.evict_if_needed();
-        self.sessions.insert(
-            session_id.clone(),
-            Session {
-                conversation_id: None,
-                last_step_idx: -1,
-                model_id: None,
-            },
-        );
-        let result = self.session_config_result_json(&session_id, None);
+        self.sessions.insert(session_id.clone(), Session::new());
+        let result = self.session_config_result_json(&session_id);
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -507,25 +607,14 @@ impl Adapter {
                 if let Some(session) = self.sessions.get_mut(session_id) {
                     session.last_step_idx = max_step_idx;
                 }
-                let model_id = self
-                    .sessions
-                    .get(session_id)
-                    .and_then(|s| s.model_id.clone());
-                self.persist_session(
-                    session_id,
-                    Some(conv_id.as_str()),
-                    max_step_idx,
-                    model_id.as_deref(),
-                );
+                if let Some(session) = self.sessions.get(session_id).cloned() {
+                    self.persist_session_state(session_id, &session);
+                }
             }
         }
 
         output_lines.push({
-            let model_id = self
-                .sessions
-                .get(session_id)
-                .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let result = self.session_config_result_json(session_id);
             serde_json::to_string(&JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -554,11 +643,7 @@ impl Adapter {
         }
 
         if self.sessions.contains_key(session_id) || self.restore_session_state(session_id) {
-            let model_id = self
-                .sessions
-                .get(session_id)
-                .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let result = self.session_config_result_json(session_id);
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -588,6 +673,10 @@ impl Adapter {
                     "sessionId": session_id,
                     "conversationId": stored.conversation_id,
                     "modelId": stored.model_id,
+                    "mode": stored.mode.clone().unwrap_or_else(|| DEFAULT_MODE.to_string()),
+                    "effort": stored.effort.clone().unwrap_or_else(|| DEFAULT_EFFORT.to_string()),
+                    "sandbox": stored.sandbox,
+                    "skipPermissions": stored.skip_permissions,
                     "lastStepIdx": stored.last_step_idx,
                 })
             })
@@ -665,16 +754,8 @@ impl Adapter {
         };
 
         session.model_id = Some(model_id.to_string());
-        let model_id_str = session.model_id.clone();
-        let last_step_idx = session.last_step_idx;
-        let conv_id = session.conversation_id.clone();
-
-        self.persist_session(
-            session_id,
-            conv_id.as_deref(),
-            last_step_idx,
-            model_id_str.as_deref(),
-        );
+        let snapshot = session.clone();
+        self.persist_session_state(session_id, &snapshot);
 
         JsonRpcResponse {
             jsonrpc: "2.0",
@@ -697,9 +778,17 @@ impl Adapter {
             .get("configId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let model_id = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        // Prefer string values; accept boolean for on/off options as a convenience.
+        let value = params
+            .get("value")
+            .and_then(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| v.as_bool().map(|b| if b { "on" } else { "off" }.to_string()))
+            })
+            .unwrap_or_default();
 
-        if session_id.is_empty() || config_id.is_empty() || model_id.is_empty() {
+        if session_id.is_empty() || config_id.is_empty() || value.is_empty() {
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -710,23 +799,11 @@ impl Adapter {
             };
         }
 
-        if config_id != Self::MODEL_CONFIG_ID {
-            return JsonRpcResponse {
-                jsonrpc: "2.0",
-                id,
-                result: None,
-                error: Some(json!({
-                    "code": -32602,
-                    "message": format!("unknown configId: {config_id}"),
-                })),
-            };
-        }
-
         if !self.sessions.contains_key(session_id) {
             let _ = self.restore_session_state(session_id);
         }
 
-        let Some(session) = self.sessions.get_mut(session_id) else {
+        if !self.sessions.contains_key(session_id) {
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -736,21 +813,74 @@ impl Adapter {
                     "message": format!("unknown sessionId: {session_id}"),
                 })),
             };
+        }
+
+        let apply_error = {
+            let session = self.sessions.get_mut(session_id).unwrap();
+            match config_id {
+                CONFIG_ID_MODEL => {
+                    session.model_id = Some(value.clone());
+                    None
+                }
+                CONFIG_ID_MODE => {
+                    if !MODE_VALUES.contains(&value.as_str()) {
+                        Some(format!(
+                            "invalid mode `{value}` (valid: {})",
+                            MODE_VALUES.join(", "),
+                        ))
+                    } else {
+                        session.mode = Some(value.clone());
+                        None
+                    }
+                }
+                CONFIG_ID_EFFORT => {
+                    if !EFFORT_VALUES.contains(&value.as_str()) {
+                        Some(format!(
+                            "invalid effort `{value}` (valid: {})",
+                            EFFORT_VALUES.join(", "),
+                        ))
+                    } else {
+                        session.effort = Some(value.clone());
+                        None
+                    }
+                }
+                CONFIG_ID_SANDBOX => match Self::parse_on_off(&value) {
+                    Some(on) => {
+                        session.sandbox = on;
+                        None
+                    }
+                    None => Some(format!(
+                        "invalid sandbox `{value}` (valid: {})",
+                        ON_OFF_VALUES.join(", "),
+                    )),
+                },
+                CONFIG_ID_SKIP_PERMISSIONS => match Self::parse_on_off(&value) {
+                    Some(on) => {
+                        session.skip_permissions = on;
+                        None
+                    }
+                    None => Some(format!(
+                        "invalid skip_permissions `{value}` (valid: {})",
+                        ON_OFF_VALUES.join(", "),
+                    )),
+                },
+                other => Some(format!("unknown configId: {other}")),
+            }
         };
 
-        session.model_id = Some(model_id.to_string());
-        let model_id_str = session.model_id.clone();
-        let last_step_idx = session.last_step_idx;
-        let conv_id = session.conversation_id.clone();
+        if let Some(message) = apply_error {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code": -32602, "message": message})),
+            };
+        }
 
-        self.persist_session(
-            session_id,
-            conv_id.as_deref(),
-            last_step_idx,
-            model_id_str.as_deref(),
-        );
+        let snapshot = self.sessions.get(session_id).cloned().unwrap();
+        self.persist_session_state(session_id, &snapshot);
 
-        let config_options = self.session_config_options_json(model_id_str.as_deref());
+        let config_options = self.session_config_options_json(&snapshot);
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -829,6 +959,19 @@ impl Adapter {
             if let Some(model_id) = &session.model_id {
                 args.push("--model".to_string());
                 args.push(model_id.clone());
+            }
+            let mode = session.mode_or_default();
+            if mode != DEFAULT_MODE {
+                args.push("--mode".to_string());
+                args.push(mode.to_string());
+            }
+            args.push("--effort".to_string());
+            args.push(session.effort_or_default().to_string());
+            if session.sandbox {
+                args.push("--sandbox".to_string());
+            }
+            if session.skip_permissions {
+                args.push("--dangerously-skip-permissions".to_string());
             }
         }
         args.push("-p".to_string());
@@ -972,16 +1115,9 @@ impl Adapter {
             }
         }
         if bound_conv_id.is_some() {
-            let model_id = self
-                .sessions
-                .get(session_id)
-                .and_then(|s| s.model_id.clone());
-            self.persist_session(
-                session_id,
-                bound_conv_id.as_deref(),
-                new_step_idx,
-                model_id.as_deref(),
-            );
+            if let Some(session) = self.sessions.get(session_id).cloned() {
+                self.persist_session_state(session_id, &session);
+            }
         }
 
         let stop_reason = if was_cancelled {

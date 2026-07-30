@@ -1010,11 +1010,7 @@ fn test_session_resume_accepts_in_memory_session() {
     };
     adapter.sessions.insert(
         "sess-memory".to_string(),
-        crate::types::Session {
-            conversation_id: None,
-            last_step_idx: -1,
-            model_id: None,
-        },
+        crate::types::Session::new(),
     );
 
     let response = adapter.handle_session_resume(json!(12), &json!({"sessionId": "sess-memory"}));
@@ -1042,11 +1038,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
     };
     adapter.sessions.insert(
         "sess-memory-load".to_string(),
-        crate::types::Session {
-            conversation_id: None,
-            last_step_idx: -1,
-            model_id: None,
-        },
+        crate::types::Session::new(),
     );
 
     let output = adapter.handle_session_load(json!(13), &json!({"sessionId": "sess-memory-load"}));
@@ -1158,8 +1150,14 @@ fn test_persist_and_restore_session() {
     };
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
-    let restored = adapter.restore_session("sess-1");
-    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None)));
+    let restored = adapter.restore_session("sess-1").expect("restored");
+    assert_eq!(restored.conversation_id.as_deref(), Some("conv-abc"));
+    assert_eq!(restored.last_step_idx, 7);
+    assert_eq!(restored.model_id, None);
+    assert_eq!(restored.mode.as_deref(), Some("default"));
+    assert_eq!(restored.effort.as_deref(), Some("medium"));
+    assert!(!restored.sandbox);
+    assert!(!restored.skip_permissions);
 
     let missing = adapter.restore_session("sess-unknown");
     assert_eq!(missing, None);
@@ -1780,12 +1778,22 @@ fn test_session_new_returns_models() {
     assert!(models.get("currentModelId").is_some());
     assert!(models.get("availableModels").is_some());
     let config_options = result.get("configOptions").unwrap().as_array().unwrap();
-    assert_eq!(config_options.len(), 1);
-    assert_eq!(config_options[0]["id"].as_str(), Some("model"));
-    assert_eq!(config_options[0]["category"].as_str(), Some("model"));
-    assert_eq!(config_options[0]["type"].as_str(), Some("select"));
-    assert!(config_options[0].get("currentValue").is_some());
-    assert!(config_options[0].get("options").is_some());
+    assert_eq!(config_options.len(), 5);
+    assert_eq!(config_options[0]["id"].as_str(), Some("mode"));
+    assert_eq!(config_options[0]["category"].as_str(), Some("mode"));
+    assert_eq!(config_options[1]["id"].as_str(), Some("model"));
+    assert_eq!(config_options[1]["category"].as_str(), Some("model"));
+    assert_eq!(config_options[2]["id"].as_str(), Some("effort"));
+    assert_eq!(config_options[2]["category"].as_str(), Some("thought_level"));
+    assert_eq!(config_options[3]["id"].as_str(), Some("sandbox"));
+    assert_eq!(config_options[4]["id"].as_str(), Some("skip_permissions"));
+    for opt in config_options {
+        assert_eq!(opt["type"].as_str(), Some("select"));
+        assert!(opt.get("currentValue").is_some());
+        assert!(opt.get("options").is_some());
+    }
+    let modes = result.get("modes").unwrap();
+    assert_eq!(modes["currentModeId"].as_str(), Some("default"));
 }
 
 #[test]
@@ -1860,7 +1868,11 @@ fn test_session_set_config_option_sets_model() {
     let config_options = set_resp.result.as_ref().unwrap()["configOptions"]
         .as_array()
         .unwrap();
-    assert_eq!(config_options[0]["currentValue"].as_str(), Some("Model B"));
+    let model_opt = config_options
+        .iter()
+        .find(|o| o["id"] == "model")
+        .unwrap();
+    assert_eq!(model_opt["currentValue"].as_str(), Some("Model B"));
 }
 
 #[test]
@@ -1912,14 +1924,12 @@ fn test_session_set_model_persists() {
         available_models: vec![],
         skip_naration: false,
     };
-    let restored = adapter2.restore_session("sess-m1");
+    let restored = adapter2.restore_session("sess-m1").expect("restored");
+    assert_eq!(restored.conversation_id.as_deref(), Some("conv-m1"));
+    assert_eq!(restored.last_step_idx, 0);
     assert_eq!(
-        restored,
-        Some((
-            "conv-m1".to_string(),
-            0,
-            Some("Claude Opus 4.6 (Thinking)".to_string())
-        ))
+        restored.model_id.as_deref(),
+        Some("Claude Opus 4.6 (Thinking)")
     );
 
     let _ = fs::remove_dir_all(root);
@@ -1930,10 +1940,10 @@ fn test_session_load_returns_models() {
     let mut adapter = Adapter::new();
     adapter.sessions.insert(
         "test-load".to_string(),
-        crate::types::Session {
-            conversation_id: None,
-            last_step_idx: -1,
-            model_id: Some("Gemini 3.1 Pro (High)".to_string()),
+        {
+            let mut s = crate::types::Session::new();
+            s.model_id = Some("Gemini 3.1 Pro (High)".to_string());
+            s
         },
     );
     adapter.persist_session(
@@ -1956,8 +1966,14 @@ fn test_session_load_returns_models() {
         models["currentModelId"].as_str(),
         Some("Gemini 3.1 Pro (High)")
     );
+    let model_opt = response["result"]["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "model")
+        .unwrap();
     assert_eq!(
-        response["result"]["configOptions"][0]["currentValue"].as_str(),
+        model_opt["currentValue"].as_str(),
         Some("Gemini 3.1 Pro (High)")
     );
 }
@@ -1982,8 +1998,17 @@ fn test_session_resume_returns_models() {
         models["currentModelId"].as_str(),
         Some("GPT-OSS 120B (Medium)")
     );
+    let model_opt = response
+        .result
+        .as_ref()
+        .unwrap()["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "model")
+        .unwrap();
     assert_eq!(
-        response.result.as_ref().unwrap()["configOptions"][0]["currentValue"].as_str(),
+        model_opt["currentValue"].as_str(),
         Some("GPT-OSS 120B (Medium)")
     );
 }
@@ -2016,13 +2041,99 @@ fn test_session_models_json_with_model() {
 fn test_session_config_options_json_with_model() {
     let mut adapter = Adapter::new();
     adapter.available_models = vec!["Model A".to_string(), "Model B".to_string()];
-    let config_options = adapter.session_config_options_json(Some("Model B"));
-    assert_eq!(config_options[0]["id"].as_str(), Some("model"));
-    assert_eq!(config_options[0]["category"].as_str(), Some("model"));
-    assert_eq!(config_options[0]["type"].as_str(), Some("select"));
-    assert_eq!(config_options[0]["currentValue"].as_str(), Some("Model B"));
-    let options = config_options[0]["options"].as_array().unwrap();
+    let mut session = crate::types::Session::new();
+    session.model_id = Some("Model B".to_string());
+    let config_options = adapter.session_config_options_json(&session);
+    assert_eq!(config_options.as_array().unwrap().len(), 5);
+    assert_eq!(config_options[0]["id"].as_str(), Some("mode"));
+    assert_eq!(config_options[1]["id"].as_str(), Some("model"));
+    assert_eq!(config_options[1]["category"].as_str(), Some("model"));
+    assert_eq!(config_options[1]["type"].as_str(), Some("select"));
+    assert_eq!(config_options[1]["currentValue"].as_str(), Some("Model B"));
+    let options = config_options[1]["options"].as_array().unwrap();
     assert_eq!(options.len(), 2);
     assert_eq!(options[0]["value"].as_str(), Some("Model A"));
     assert_eq!(options[1]["value"].as_str(), Some("Model B"));
+    assert_eq!(config_options[2]["id"].as_str(), Some("effort"));
+    assert_eq!(config_options[2]["currentValue"].as_str(), Some("medium"));
+    assert_eq!(config_options[3]["currentValue"].as_str(), Some("off"));
+    assert_eq!(config_options[4]["currentValue"].as_str(), Some("off"));
+}
+
+#[test]
+fn test_session_set_config_option_mode_effort_sandbox() {
+    let mut adapter = Adapter::new();
+    adapter.available_models = vec!["Model A".to_string()];
+    let new_resp = adapter.handle_session_new(json!(1));
+    let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mode_resp = adapter.handle_session_set_config_option(
+        json!(2),
+        &json!({"sessionId": session_id, "configId": "mode", "value": "plan"}),
+    );
+    assert!(mode_resp.error.is_none(), "error: {:?}", mode_resp.error);
+    assert_eq!(
+        adapter.sessions.get(&session_id).unwrap().mode.as_deref(),
+        Some("plan")
+    );
+
+    let effort_resp = adapter.handle_session_set_config_option(
+        json!(3),
+        &json!({"sessionId": session_id, "configId": "effort", "value": "high"}),
+    );
+    assert!(effort_resp.error.is_none());
+    assert_eq!(
+        adapter.sessions.get(&session_id).unwrap().effort.as_deref(),
+        Some("high")
+    );
+
+    let sandbox_resp = adapter.handle_session_set_config_option(
+        json!(4),
+        &json!({"sessionId": session_id, "configId": "sandbox", "value": "on"}),
+    );
+    assert!(sandbox_resp.error.is_none());
+    assert!(adapter.sessions.get(&session_id).unwrap().sandbox);
+
+    let skip_resp = adapter.handle_session_set_config_option(
+        json!(5),
+        &json!({"sessionId": session_id, "configId": "skip_permissions", "value": true}),
+    );
+    assert!(skip_resp.error.is_none());
+    assert!(adapter.sessions.get(&session_id).unwrap().skip_permissions);
+
+    let options = skip_resp.result.as_ref().unwrap()["configOptions"]
+        .as_array()
+        .unwrap();
+    let by_id = |id: &str| {
+        options
+            .iter()
+            .find(|o| o["id"] == id)
+            .unwrap()["currentValue"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(by_id("mode"), "plan");
+    assert_eq!(by_id("effort"), "high");
+    assert_eq!(by_id("sandbox"), "on");
+    assert_eq!(by_id("skip_permissions"), "on");
+}
+
+#[test]
+fn test_session_set_config_option_rejects_invalid_mode() {
+    let mut adapter = Adapter::new();
+    let new_resp = adapter.handle_session_new(json!(1));
+    let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = adapter.handle_session_set_config_option(
+        json!(2),
+        &json!({"sessionId": session_id, "configId": "mode", "value": "yolo"}),
+    );
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.as_ref().unwrap()["code"].as_i64(), Some(-32602));
 }
