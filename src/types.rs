@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -35,7 +35,7 @@ pub struct SessionStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
     pub conversation_id: Option<String>,
-    /// Last step idx read from SQLite; used for delta extraction.
+    /// Last stream-json step index observed for this conversation.
     #[serde(default)]
     pub last_step_idx: i64,
     /// Selected model ID for this session.
@@ -45,28 +45,8 @@ pub struct StoredSession {
 
 pub struct Session {
     pub conversation_id: Option<String>,
-    /// Last step idx read from SQLite.
+    /// Last stream-json step index observed for this conversation.
     pub last_step_idx: i64,
     /// Selected model ID for this session.
     pub model_id: Option<String>,
-}
-
-#[cfg(test)]
-pub struct ConversationDelta {
-    pub text: Option<String>,
-    pub max_step_idx: i64,
-}
-
-#[derive(Debug, Default)]
-pub struct StreamingState {
-    pub conversation_id: Option<String>,
-    pub base_step_idx: i64,
-    pub last_step_idx: i64,
-    pub had_updates: bool,
-    pub agent_text_lengths: HashMap<i64, usize>,
-    pub thought_text_lengths: HashMap<i64, usize>,
-    pub emitted_tool_steps: HashSet<i64>,
-    pub last_title: Option<String>,
-    pub skip_naration: bool,
-    pub child_pid: Option<u32>,
 }

@@ -79,7 +79,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 
 ## Session Persistence
 
-Sessions are persisted to `~/.openab/agy-acp/sessions.json`. When you resume a session in Zed, `agy-acp` restores the conversation binding and replays the message history from `agy`'s SQLite conversation databases (`~/.gemini/antigravity-cli/conversations/*.db`).
+Sessions are persisted to `~/.openab/agy-acp/sessions.json`. When you resume a session in Zed, `agy-acp` restores the conversation binding and continues it with `agy --conversation <id>`. Live responses are streamed from `agy --output-format stream-json` as incremental `session/update` notifications.
 
 ## Debugging
 

@@ -1,7 +1,6 @@
 mod adapter;
-mod db;
-mod protobuf;
 mod streaming;
+mod tools;
 mod types;
 
 #[cfg(test)]
