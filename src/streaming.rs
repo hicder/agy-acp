@@ -292,7 +292,7 @@ impl StreamProcessor {
             "status": status,
         });
         if let Some(input) = parameters.cloned() {
-            update["rawInput"] = input;
+            update["rawInput"] = normalize_tool_input(name, input);
         }
         if let Some(output) = raw_output.clone() {
             update["rawOutput"] = output;
@@ -356,6 +356,26 @@ impl StreamProcessor {
             }),
         )]
     }
+}
+
+fn normalize_tool_input(tool_name: &str, input: Value) -> Value {
+    if tool_name != "run_command" {
+        return input;
+    }
+    let Value::Object(mut input) = input else {
+        return input;
+    };
+    if !input.contains_key("command") {
+        if let Some(command) = input.get("CommandLine").cloned() {
+            input.insert("command".to_string(), command);
+        }
+    }
+    if !input.contains_key("cwd") {
+        if let Some(cwd) = input.get("Cwd").cloned() {
+            input.insert("cwd".to_string(), cwd);
+        }
+    }
+    Value::Object(input)
 }
 
 fn is_thought_step(step_type: &str) -> bool {

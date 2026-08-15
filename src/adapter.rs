@@ -22,16 +22,33 @@ pub struct Adapter {
     pub state_file: PathBuf,
     pub available_models: Vec<String>,
     pub skip_naration: bool,
+    pub dangerously_skip_permissions: bool,
+    pub sandbox: bool,
 }
 
 impl Adapter {
     pub const MODEL_CONFIG_ID: &'static str = "model";
+    pub const EFFORT_CONFIG_ID: &'static str = "effort";
+    pub const DEFAULT_MODE_ID: &'static str = "accept-edits";
+    pub const AVAILABLE_MODES: [(&'static str, &'static str); 2] =
+        [("accept-edits", "Accept edits"), ("plan", "Plan")];
+    pub const AVAILABLE_EFFORTS: [&'static str; 3] = ["low", "medium", "high"];
 
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::new_with_skip_naration(false)
     }
 
+    #[cfg(test)]
     pub fn new_with_skip_naration(skip_naration: bool) -> Self {
+        Self::new_with_options(skip_naration, false, false)
+    }
+
+    pub fn new_with_options(
+        skip_naration: bool,
+        dangerously_skip_permissions: bool,
+        sandbox: bool,
+    ) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let state_dir = PathBuf::from(&home).join(".openab/agy-acp");
         Self {
@@ -42,6 +59,8 @@ impl Adapter {
             state_file: state_dir.join("sessions.json"),
             available_models: Self::fetch_available_models(),
             skip_naration,
+            dangerously_skip_permissions,
+            sandbox,
         }
     }
 
@@ -81,7 +100,24 @@ impl Adapter {
     }
 
     /// Build the ACP session config option that Zed uses for its model selector.
+    pub fn session_modes_json(mode_id: Option<&str>) -> Value {
+        let current = mode_id.unwrap_or(Self::DEFAULT_MODE_ID);
+        json!({
+            "currentModeId": current,
+            "availableModes": Self::AVAILABLE_MODES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[cfg(test)]
     pub fn session_config_options_json(&mut self, model_id: Option<&str>) -> Value {
+        self.session_config_options_json_with_effort(model_id, None)
+    }
+
+    pub fn session_config_options_json_with_effort(
+        &mut self,
+        model_id: Option<&str>,
+        effort: Option<&str>,
+    ) -> Value {
         if self.available_models.is_empty() {
             self.available_models = Self::fetch_available_models();
         }
@@ -105,6 +141,13 @@ impl Adapter {
             "type": "select",
             "currentValue": current,
             "options": options,
+        }, {
+            "id": Self::EFFORT_CONFIG_ID,
+            "name": "Effort",
+            "category": "general",
+            "type": "select",
+            "currentValue": effort.unwrap_or("medium"),
+            "options": Self::AVAILABLE_EFFORTS.iter().map(|value| json!({ "value": value, "name": value })).collect::<Vec<_>>(),
         }])
     }
 
@@ -112,11 +155,14 @@ impl Adapter {
         &mut self,
         session_id: &str,
         model_id: Option<&str>,
+        mode_id: Option<&str>,
+        effort: Option<&str>,
     ) -> Value {
         json!({
             "sessionId": session_id,
             "models": self.session_models_json(model_id),
-            "configOptions": self.session_config_options_json(model_id),
+            "modes": Self::session_modes_json(mode_id),
+            "configOptions": self.session_config_options_json_with_effort(model_id, effort),
         })
     }
 
@@ -151,22 +197,60 @@ impl Adapter {
     }
 
     /// Try to restore conversation_id, last_step_idx, and model_id from persisted state.
+    #[cfg(test)]
     pub fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>)> {
+        self.restore_session_with_controls(session_id).map(
+            |(conversation_id, last_step_idx, model_id, _, _)| {
+                (conversation_id, last_step_idx, model_id)
+            },
+        )
+    }
+
+    pub fn restore_session_with_controls(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, i64, Option<String>, String, Option<String>)> {
         let store = self.load_store();
         store.sessions.get(session_id).and_then(|s| {
-            s.conversation_id
-                .clone()
-                .map(|cid| (cid, s.last_step_idx, s.model_id.clone()))
+            s.conversation_id.clone().map(|cid| {
+                (
+                    cid,
+                    s.last_step_idx,
+                    s.model_id.clone(),
+                    s.mode_id.clone(),
+                    s.effort.clone(),
+                )
+            })
         })
     }
 
     /// Persist a session binding (read-modify-write under single lock).
+    #[cfg(test)]
     pub fn persist_session(
         &self,
         session_id: &str,
         conversation_id: Option<&str>,
         last_step_idx: i64,
         model_id: Option<&str>,
+    ) {
+        self.persist_session_with_controls(
+            session_id,
+            conversation_id,
+            last_step_idx,
+            model_id,
+            Self::DEFAULT_MODE_ID,
+            None,
+        )
+    }
+
+    pub fn persist_session_with_controls(
+        &self,
+        session_id: &str,
+        conversation_id: Option<&str>,
+        last_step_idx: i64,
+        model_id: Option<&str>,
+        mode_id: &str,
+        effort: Option<&str>,
     ) {
         let Some(_lock) = self.lock_state_file() else {
             return;
@@ -178,6 +262,8 @@ impl Adapter {
                 conversation_id: conversation_id.map(String::from),
                 last_step_idx,
                 model_id: model_id.map(String::from),
+                mode_id: mode_id.to_string(),
+                effort: effort.map(String::from),
             },
         );
         let tmp = self.state_file.with_extension("tmp");
@@ -217,7 +303,8 @@ impl Adapter {
     }
 
     pub fn restore_session_state(&mut self, session_id: &str) -> bool {
-        let Some((conversation_id, last_step_idx, model_id)) = self.restore_session(session_id)
+        let Some((conversation_id, last_step_idx, model_id, mode_id, effort)) =
+            self.restore_session_with_controls(session_id)
         else {
             return false;
         };
@@ -230,6 +317,8 @@ impl Adapter {
                 conversation_id: Some(conversation_id),
                 last_step_idx,
                 model_id,
+                mode_id,
+                effort,
             },
         );
         true
@@ -261,9 +350,12 @@ impl Adapter {
                 conversation_id: None,
                 last_step_idx: -1,
                 model_id: None,
+                mode_id: Self::DEFAULT_MODE_ID.to_string(),
+                effort: None,
             },
         );
-        let result = self.session_config_result_json(&session_id, None);
+        let result =
+            self.session_config_result_json(&session_id, None, Some(Self::DEFAULT_MODE_ID), None);
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -302,11 +394,16 @@ impl Adapter {
         }
 
         vec![{
-            let model_id = self
-                .sessions
-                .get(session_id)
-                .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let session = self.sessions.get(session_id).unwrap();
+            let model_id = session.model_id.clone();
+            let mode_id = session.mode_id.clone();
+            let effort = session.effort.clone();
+            let result = self.session_config_result_json(
+                session_id,
+                model_id.as_deref(),
+                Some(&mode_id),
+                effort.as_deref(),
+            );
             serde_json::to_string(&JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -333,11 +430,16 @@ impl Adapter {
         }
 
         if self.sessions.contains_key(session_id) || self.restore_session_state(session_id) {
-            let model_id = self
-                .sessions
-                .get(session_id)
-                .and_then(|s| s.model_id.clone());
-            let result = self.session_config_result_json(session_id, model_id.as_deref());
+            let session = self.sessions.get(session_id).unwrap();
+            let model_id = session.model_id.clone();
+            let mode_id = session.mode_id.clone();
+            let effort = session.effort.clone();
+            let result = self.session_config_result_json(
+                session_id,
+                model_id.as_deref(),
+                Some(&mode_id),
+                effort.as_deref(),
+            );
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -393,12 +495,16 @@ impl Adapter {
         let model_id_str = session.model_id.clone();
         let last_step_idx = session.last_step_idx;
         let conv_id = session.conversation_id.clone();
+        let mode_id = session.mode_id.clone();
+        let effort = session.effort.clone();
 
-        self.persist_session(
+        self.persist_session_with_controls(
             session_id,
             conv_id.as_deref(),
             last_step_idx,
             model_id_str.as_deref(),
+            &mode_id,
+            effort.as_deref(),
         );
 
         JsonRpcResponse {
@@ -422,9 +528,9 @@ impl Adapter {
             .get("configId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let model_id = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
-        if session_id.is_empty() || config_id.is_empty() || model_id.is_empty() {
+        if session_id.is_empty() || config_id.is_empty() || value.is_empty() {
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -435,7 +541,7 @@ impl Adapter {
             };
         }
 
-        if config_id != Self::MODEL_CONFIG_ID {
+        if config_id != Self::MODEL_CONFIG_ID && config_id != Self::EFFORT_CONFIG_ID {
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -463,25 +569,136 @@ impl Adapter {
             };
         };
 
-        session.model_id = Some(model_id.to_string());
+        if config_id == Self::MODEL_CONFIG_ID {
+            session.model_id = Some(value.to_string());
+        } else if !Self::AVAILABLE_EFFORTS.contains(&value) {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(
+                    json!({ "code": -32602, "message": format!("invalid effort: {value}") }),
+                ),
+            };
+        } else {
+            session.effort = Some(value.to_string());
+        }
         let model_id_str = session.model_id.clone();
         let last_step_idx = session.last_step_idx;
         let conv_id = session.conversation_id.clone();
+        let mode_id = session.mode_id.clone();
+        let effort = session.effort.clone();
 
-        self.persist_session(
+        self.persist_session_with_controls(
             session_id,
             conv_id.as_deref(),
             last_step_idx,
             model_id_str.as_deref(),
+            &mode_id,
+            effort.as_deref(),
         );
 
-        let config_options = self.session_config_options_json(model_id_str.as_deref());
+        let config_options = self
+            .session_config_options_json_with_effort(model_id_str.as_deref(), effort.as_deref());
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: Some(json!({ "configOptions": config_options })),
             error: None,
         }
+    }
+
+    pub fn handle_session_set_mode(&mut self, id: Value, params: &Value) -> JsonRpcResponse {
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mode_id = params.get("modeId").and_then(|v| v.as_str()).unwrap_or("");
+        if session_id.is_empty() || mode_id.is_empty() {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code":-32602,"message":"missing sessionId or modeId"})),
+            };
+        }
+        if !Self::AVAILABLE_MODES.iter().any(|(id, _)| *id == mode_id) {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code":-32602,"message":format!("invalid modeId: {mode_id}")})),
+            };
+        }
+        if !self.sessions.contains_key(session_id) {
+            let _ = self.restore_session_state(session_id);
+        }
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(
+                    json!({"code":-32000,"message":format!("unknown sessionId: {session_id}")}),
+                ),
+            };
+        };
+        session.mode_id = mode_id.to_string();
+        let conversation_id = session.conversation_id.clone();
+        let model_id = session.model_id.clone();
+        let last_step_idx = session.last_step_idx;
+        let effort = session.effort.clone();
+        self.persist_session_with_controls(
+            session_id,
+            conversation_id.as_deref(),
+            last_step_idx,
+            model_id.as_deref(),
+            mode_id,
+            effort.as_deref(),
+        );
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(json!({ "modes": Self::session_modes_json(Some(mode_id)) })),
+            error: None,
+        }
+    }
+
+    pub(crate) fn child_args(&self, session_id: &str, clean_prompt: &str) -> Vec<String> {
+        let mut args = vec!["--add-dir".to_string(), self.working_dir.clone()];
+        if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
+            args.extend(
+                extra
+                    .split_whitespace()
+                    .filter(|arg| {
+                        !(*arg == "--dangerously-skip-permissions"
+                            && self.dangerously_skip_permissions)
+                            && !(*arg == "--sandbox" && self.sandbox)
+                    })
+                    .map(String::from),
+            );
+        }
+        if self.dangerously_skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+        if self.sandbox {
+            args.push("--sandbox".to_string());
+        }
+        args.extend(["--output-format".to_string(), "stream-json".to_string()]);
+        if let Some(session) = self.sessions.get(session_id) {
+            if let Some(conv_id) = &session.conversation_id {
+                args.extend(["--conversation".to_string(), conv_id.clone()]);
+            }
+            if let Some(model_id) = &session.model_id {
+                args.extend(["--model".to_string(), model_id.clone()]);
+            }
+            args.extend(["--mode".to_string(), session.mode_id.clone()]);
+            if let Some(effort) = &session.effort {
+                args.extend(["--effort".to_string(), effort.clone()]);
+            }
+        }
+        args.extend(["-p".to_string(), clean_prompt.to_string()]);
+        args
     }
 
     pub async fn handle_session_prompt(
@@ -511,26 +728,7 @@ impl Adapter {
             .unwrap_or_default();
         let clean_prompt = prompt_text.trim();
 
-        let mut args: Vec<String> = Vec::new();
-        args.push("--add-dir".to_string());
-        args.push(self.working_dir.clone());
-        if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
-            args.extend(extra.split_whitespace().map(String::from));
-        }
-        args.push("--output-format".to_string());
-        args.push("stream-json".to_string());
-        if let Some(session) = self.sessions.get(session_id) {
-            if let Some(conv_id) = &session.conversation_id {
-                args.push("--conversation".to_string());
-                args.push(conv_id.clone());
-            }
-            if let Some(model_id) = &session.model_id {
-                args.push("--model".to_string());
-                args.push(model_id.clone());
-            }
-        }
-        args.push("-p".to_string());
-        args.push(clean_prompt.to_string());
+        let args = self.child_args(session_id, clean_prompt);
 
         let spawn_result = Command::new("agy")
             .args(&args)
@@ -620,11 +818,16 @@ impl Adapter {
                 .sessions
                 .get(session_id)
                 .and_then(|s| s.model_id.clone());
-            self.persist_session(
+            let session = self.sessions.get(session_id);
+            self.persist_session_with_controls(
                 session_id,
                 bound_conv_id.as_deref(),
                 new_step_idx,
                 model_id.as_deref(),
+                session
+                    .map(|s| s.mode_id.as_str())
+                    .unwrap_or(Self::DEFAULT_MODE_ID),
+                session.and_then(|s| s.effort.as_deref()),
             );
         }
 

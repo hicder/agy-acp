@@ -41,6 +41,16 @@ pub struct StoredSession {
     /// Selected model ID for this session.
     #[serde(default)]
     pub model_id: Option<String>,
+    /// Selected agy start mode. Older session files default to accept-edits.
+    #[serde(default = "default_mode_id")]
+    pub mode_id: String,
+    /// Selected agy reasoning effort. None means leave the CLI default intact.
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+pub fn default_mode_id() -> String {
+    "accept-edits".to_string()
 }
 
 pub struct Session {
@@ -49,4 +59,6 @@ pub struct Session {
     pub last_step_idx: i64,
     /// Selected model ID for this session.
     pub model_id: Option<String>,
+    pub mode_id: String,
+    pub effort: Option<String>,
 }

@@ -48,17 +48,19 @@ Add `agy-acp` as a custom agent server in your Zed settings (`~/.config/zed/sett
     "agy": {
       "type": "custom",
       "command": "agy-acp",
-      "args": [],
-      "env": {
-        "AGY_EXTRA_ARGS": "--dangerously-skip-permissions"
-      }
+      "args": ["--dangerously-skip-permissions"],
+      "env": {}
     }
   }
 }
 ```
 
-> [!IMPORTANT]
-> **Tool Execution & Permissions:** Antigravity CLI does not natively support the ACP protocol yet, meaning interactive permission prompts from `agy` cannot be answered through ACP hosts. You **must** set `AGY_EXTRA_ARGS="--dangerously-skip-permissions"` in your environment so `agy` auto-approves tool permission requests, enabling tools (file editing, command execution, searching, etc.) to run properly.
+> [!WARNING]
+> **Tool Execution & Permissions:** Antigravity confirmation prompts cannot be
+> answered through ACP hosts. For a trusted local worktree only, pass
+> `--dangerously-skip-permissions` to `agy-acp`; it forwards the flag to `agy`
+> and bypasses those confirmations. Do not make this the default for untrusted
+> repositories.
 
 Then open the Agent Panel in Zed (`Cmd-?` on macOS, `Ctrl-?` on Linux), select **agy** from the agent dropdown, and start chatting.
 
@@ -98,11 +100,18 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 }
 ```
 
+`AGY_EXTRA_ARGS` is retained for compatibility. Prefer the explicit
+`agy-acp --dangerously-skip-permissions` and `agy-acp --sandbox` switches for
+those supported controls. When an explicit switch is supplied, a duplicate
+legacy environment flag is ignored.
+
 ## Configuration & Environment
 
 | Setting / Variable | Description |
 |---|---|
 | `--skip-naration` | CLI flag to filter out leading narrative preamble messages |
+| `--dangerously-skip-permissions` | Forward the trusted-worktree permission bypass to `agy` |
+| `--sandbox` | Forward the installed `agy` sandbox-mode request |
 | `GEMINI_API_KEY` | API key for Gemini (passed through to `agy`) |
 | `AGY_EXTRA_ARGS` | Space-separated extra args passed to every `agy` invocation |
 
@@ -117,4 +126,3 @@ To inspect the JSON-RPC messages between Zed and `agy-acp`, run `dev: open acp l
 ## License
 
 MIT
-

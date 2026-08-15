@@ -25,16 +25,22 @@ struct Cli {
     /// Skip pure narration messages from agy, such as "I will ...".
     #[arg(long = "skip-naration", default_value_t = false)]
     skip_naration: bool,
+    /// Pass --dangerously-skip-permissions to the child agy process.
+    #[arg(long, default_value_t = false)]
+    dangerously_skip_permissions: bool,
+    /// Pass --sandbox to the child agy process.
+    #[arg(long, default_value_t = false)]
+    sandbox: bool,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let adapter = if cli.skip_naration {
-        Adapter::new_with_skip_naration(true)
-    } else {
-        Adapter::new()
-    };
+    let adapter = Adapter::new_with_options(
+        cli.skip_naration,
+        cli.dangerously_skip_permissions,
+        cli.sandbox,
+    );
     let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
     let active_cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -218,6 +224,11 @@ async fn main() {
                     serde_json::to_string(&adapter.handle_session_set_config_option(id, &params))
                         .unwrap(),
                 ]
+            }
+            Some("session/set_mode") | Some("session/setMode") => {
+                let params = req.params.unwrap_or(json!({}));
+                let mut adapter = adapter.lock().await;
+                vec![serde_json::to_string(&adapter.handle_session_set_mode(id, &params)).unwrap()]
             }
             Some(method) => {
                 let r = JsonRpcResponse {

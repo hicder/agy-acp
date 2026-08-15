@@ -87,8 +87,8 @@ fn test_stream_json_emits_tool_call_then_update() {
         false,
         "sess-1",
         &[
-            r#"{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello"}}}}"#,
-            r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello"},"output":"hello\n"}}}"#,
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello","Cwd":"/tmp/work"}}}}"#,
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello","Cwd":"/tmp/work"},"output":"hello\n"}}}"#,
         ],
     );
     assert_eq!(updates.len(), 2);
@@ -97,6 +97,8 @@ fn test_stream_json_emits_tool_call_then_update() {
     assert_eq!(updates[0]["toolCallId"], "agy-3");
     assert_eq!(updates[0]["kind"], "execute");
     assert_eq!(updates[0]["rawInput"]["CommandLine"], "echo hello");
+    assert_eq!(updates[0]["rawInput"]["command"], "echo hello");
+    assert_eq!(updates[0]["rawInput"]["cwd"], "/tmp/work");
     assert_eq!(updates[1]["sessionUpdate"], "tool_call_update");
     assert_eq!(updates[1]["status"], "completed");
     assert_eq!(updates[1]["rawOutput"]["output"], "hello\n");
@@ -175,6 +177,79 @@ fn test_initialize_advertises_resume_capability() {
 }
 
 #[test]
+fn test_session_new_advertises_modes_and_effort() {
+    let mut adapter = Adapter::new();
+    adapter.available_models = vec!["Model A".to_string()];
+    let response = adapter.handle_session_new(json!(1));
+    let result = response.result.unwrap();
+    assert_eq!(result["modes"]["currentModeId"], "accept-edits");
+    assert_eq!(result["modes"]["availableModes"][1]["id"], "plan");
+    assert_eq!(result["configOptions"][1]["id"], "effort");
+    assert_eq!(result["configOptions"][1]["currentValue"], "medium");
+}
+
+#[test]
+fn test_mode_and_effort_updates_persist_and_build_child_args() {
+    let mut adapter = Adapter::new_with_options(false, true, true);
+    adapter.available_models = vec!["Model A".to_string()];
+    let session_id = adapter.handle_session_new(json!(1)).result.unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(adapter
+        .handle_session_set_mode(
+            json!(2),
+            &json!({"sessionId": session_id, "modeId": "plan"})
+        )
+        .error
+        .is_none());
+    assert!(adapter
+        .handle_session_set_config_option(
+            json!(3),
+            &json!({"sessionId": session_id, "configId": "effort", "value": "high"})
+        )
+        .error
+        .is_none());
+    let args = adapter.child_args(&session_id, "hello");
+    assert!(args.windows(2).any(|pair| pair == ["--mode", "plan"]));
+    assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]));
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.as_str() == "--dangerously-skip-permissions")
+            .count(),
+        1
+    );
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.as_str() == "--sandbox")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn test_invalid_mode_and_effort_do_not_change_session() {
+    let mut adapter = Adapter::new();
+    let session_id = adapter.handle_session_new(json!(1)).result.unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let invalid_mode = adapter.handle_session_set_mode(
+        json!(2),
+        &json!({"sessionId": session_id, "modeId": "invalid"}),
+    );
+    let invalid_effort = adapter.handle_session_set_config_option(
+        json!(3),
+        &json!({"sessionId": session_id, "configId": "effort", "value": "max"}),
+    );
+    assert_eq!(invalid_mode.error.unwrap()["code"], -32602);
+    assert_eq!(invalid_effort.error.unwrap()["code"], -32602);
+    let session = adapter.sessions.get(&session_id).unwrap();
+    assert_eq!(session.mode_id, "accept-edits");
+    assert_eq!(session.effort, None);
+}
+
+#[test]
 #[ignore]
 fn test_session_load_restores_persisted_session() {
     let root = std::env::temp_dir().join(format!("agy-acp-load-{}", Uuid::new_v4()));
@@ -186,6 +261,8 @@ fn test_session_load_restores_persisted_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
     adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
@@ -219,6 +296,8 @@ fn test_session_load_rejects_unknown_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
 
     let output = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -244,6 +323,8 @@ fn test_session_resume_restores_persisted_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
     adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
 
@@ -284,6 +365,8 @@ fn test_session_resume_rejects_unknown_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
 
     let response = adapter.handle_session_resume(json!(11), &json!({"sessionId": "nope"}));
@@ -323,6 +406,8 @@ fn test_session_resume_accepts_in_memory_session() {
         state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
     adapter.sessions.insert(
         "sess-memory".to_string(),
@@ -330,6 +415,8 @@ fn test_session_resume_accepts_in_memory_session() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            mode_id: Adapter::DEFAULT_MODE_ID.to_string(),
+            effort: None,
         },
     );
 
@@ -354,6 +441,8 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
         state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
     adapter.sessions.insert(
         "sess-memory-load".to_string(),
@@ -361,6 +450,8 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            mode_id: Adapter::DEFAULT_MODE_ID.to_string(),
+            effort: None,
         },
     );
 
@@ -384,6 +475,8 @@ fn test_session_resume_does_not_replay_history() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
     adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
 
@@ -413,6 +506,8 @@ fn test_persist_and_restore_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
@@ -845,12 +940,13 @@ fn test_session_new_returns_models() {
     assert!(models.get("currentModelId").is_some());
     assert!(models.get("availableModels").is_some());
     let config_options = result.get("configOptions").unwrap().as_array().unwrap();
-    assert_eq!(config_options.len(), 1);
+    assert_eq!(config_options.len(), 2);
     assert_eq!(config_options[0]["id"].as_str(), Some("model"));
     assert_eq!(config_options[0]["category"].as_str(), Some("model"));
     assert_eq!(config_options[0]["type"].as_str(), Some("select"));
     assert!(config_options[0].get("currentValue").is_some());
     assert!(config_options[0].get("options").is_some());
+    assert_eq!(config_options[1]["id"].as_str(), Some("effort"));
 }
 
 #[test]
@@ -958,6 +1054,8 @@ fn test_session_set_model_persists() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
 
     adapter.persist_session("sess-m1", Some("conv-m1"), 0, None);
@@ -974,6 +1072,8 @@ fn test_session_set_model_persists() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        dangerously_skip_permissions: false,
+        sandbox: false,
     };
     let restored = adapter2.restore_session("sess-m1");
     assert_eq!(
@@ -997,6 +1097,8 @@ fn test_session_load_returns_models() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: Some("Gemini 3.1 Pro (High)".to_string()),
+            mode_id: Adapter::DEFAULT_MODE_ID.to_string(),
+            effort: None,
         },
     );
     adapter.persist_session(
