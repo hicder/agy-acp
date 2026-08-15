@@ -507,10 +507,17 @@ impl Adapter {
             effort.as_deref(),
         );
 
+        let config_options = self
+            .session_config_options_json_with_effort(model_id_str.as_deref(), effort.as_deref());
+
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
-            result: Some(json!({})),
+            result: Some(json!({
+                "models": self.session_models_json(model_id_str.as_deref()),
+                "modes": Self::session_modes_json(Some(&mode_id)),
+                "configOptions": config_options,
+            })),
             error: None,
         }
     }
