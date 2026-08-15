@@ -7,8 +7,10 @@ use uuid::Uuid;
 use crate::adapter::{filter_narration, parse_available_models, Adapter};
 use crate::streaming::StreamProcessor;
 use crate::tools::tool_kind;
-use crate::Cli;
+use crate::{write_output_event, OutputEvent, Cli};
 use clap::Parser;
+use std::thread;
+use tokio::sync::mpsc;
 
 fn process_lines(
     skip_naration: bool,
@@ -24,6 +26,53 @@ fn process_lines(
         }
     }
     (processor, updates)
+}
+
+#[tokio::test]
+async fn output_channel_preserves_json_rpc_frame_boundaries_under_concurrent_senders() {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let mut producers = Vec::new();
+
+    for producer in 0..2 {
+        let sender = sender.clone();
+        producers.push(thread::spawn(move || {
+            for sequence in 0..64 {
+                let frame = serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "producer": producer,
+                        "sequence": sequence,
+                        "payload": "x".repeat(4096),
+                    },
+                }))
+                .unwrap();
+                sender.send(OutputEvent::Frame(frame)).unwrap();
+            }
+        }));
+    }
+    drop(sender);
+
+    for producer in producers {
+        producer.join().unwrap();
+    }
+
+    let mut stdout = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        write_output_event(&mut stdout, event).unwrap();
+    }
+
+    let frames: Vec<Value> = String::from_utf8(stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames.len(), 128);
+    assert!(frames.iter().all(|frame| {
+        frame["jsonrpc"] == "2.0"
+            && frame["method"] == "session/update"
+            && frame["params"]["payload"].as_str().is_some_and(|payload| payload.len() == 4096)
+    }));
 }
 
 #[test]

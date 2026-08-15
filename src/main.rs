@@ -19,6 +19,27 @@ use adapter::Adapter;
 use clap::Parser;
 use types::{JsonRpcRequest, JsonRpcResponse};
 
+pub(crate) enum OutputEvent {
+    Frame(String),
+    PromptFinished,
+}
+
+/// The only stdout writer for the bridge. Every JSON-RPC response and
+/// notification reaches this function through the shared output channel.
+pub(crate) fn write_output_event<W: Write>(
+    stdout: &mut W,
+    event: OutputEvent,
+) -> io::Result<bool> {
+    match event {
+        OutputEvent::Frame(line) => {
+            writeln!(stdout, "{line}")?;
+            stdout.flush()?;
+            Ok(true)
+        }
+        OutputEvent::PromptFinished => Ok(false),
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
@@ -40,7 +61,7 @@ async fn main() {
         Arc::new(Mutex::new(HashMap::new()));
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Option<String>>();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<OutputEvent>();
     std::thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -69,11 +90,11 @@ async fn main() {
             tokio::select! {
                 output = out_rx.recv() => {
                     match output {
-                        Some(Some(line)) => {
-                            let _ = writeln!(stdout, "{}", line);
-                            let _ = stdout.flush();
+                        Some(event) => {
+                            if !write_output_event(&mut stdout, event).unwrap_or(true) {
+                                pending_prompts = pending_prompts.saturating_sub(1);
+                            }
                         }
-                        Some(None) => pending_prompts = pending_prompts.saturating_sub(1),
                         None => {}
                     }
                     continue;
@@ -90,23 +111,19 @@ async fn main() {
             }
         } else {
             match out_rx.recv().await {
-                Some(Some(line)) => {
-                    let _ = writeln!(stdout, "{}", line);
-                    let _ = stdout.flush();
+                Some(event) => {
+                    if !write_output_event(&mut stdout, event).unwrap_or(true) {
+                        pending_prompts = pending_prompts.saturating_sub(1);
+                    }
                 }
-                Some(None) => pending_prompts = pending_prompts.saturating_sub(1),
                 None => break,
             }
             continue;
         };
 
         while let Ok(output) = out_rx.try_recv() {
-            match output {
-                Some(line) => {
-                    let _ = writeln!(stdout, "{}", line);
-                    let _ = stdout.flush();
-                }
-                None => pending_prompts = pending_prompts.saturating_sub(1),
+            if !write_output_event(&mut stdout, output).unwrap_or(true) {
+                pending_prompts = pending_prompts.saturating_sub(1);
             }
         }
 
@@ -174,15 +191,17 @@ async fn main() {
                 tokio::spawn(async move {
                     let output = {
                         let mut adapter = adapter.lock().await;
-                        adapter.handle_session_prompt(id, &params, cancelled).await
+                        adapter
+                            .handle_session_prompt(id, &params, cancelled, out_tx.clone())
+                            .await
                     };
                     if !session_id.is_empty() {
                         active_cancellations.lock().unwrap().remove(&session_id);
                     }
                     for line in output {
-                        let _ = out_tx.send(Some(line));
+                        let _ = out_tx.send(OutputEvent::Frame(line));
                     }
-                    let _ = out_tx.send(None);
+                    let _ = out_tx.send(OutputEvent::PromptFinished);
                 });
                 Vec::new()
             }
@@ -234,8 +253,7 @@ async fn main() {
         };
 
         for line in output {
-            let _ = writeln!(stdout, "{}", line);
+            let _ = out_tx.send(OutputEvent::Frame(line));
         }
-        let _ = stdout.flush();
     }
 }

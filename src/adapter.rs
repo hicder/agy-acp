@@ -2,7 +2,6 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -15,6 +14,8 @@ use uuid::Uuid;
 
 use crate::streaming::StreamProcessor;
 use crate::types::*;
+use crate::OutputEvent;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub struct Adapter {
     pub sessions: HashMap<String, Session>,
@@ -489,6 +490,7 @@ impl Adapter {
         id: Value,
         params: &Value,
         cancelled: Arc<AtomicBool>,
+        output: UnboundedSender<OutputEvent>,
     ) -> Vec<String> {
         let session_id = params
             .get("sessionId")
@@ -560,12 +562,12 @@ impl Adapter {
             let mut processor = StreamProcessor::new(skip_naration);
             if let Some(stdout) = stdout {
                 let mut lines = BufReader::new(stdout).lines();
-                let mut out = io::stdout();
                 while let Ok(Some(line)) = lines.next_line().await {
                     for notification in processor.process_line(&line, &poll_session_id) {
-                        let _ = writeln!(out, "{}", notification);
+                        if output.send(OutputEvent::Frame(notification)).is_err() {
+                            return processor;
+                        }
                     }
-                    let _ = out.flush();
                 }
             }
             processor
