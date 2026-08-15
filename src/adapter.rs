@@ -57,7 +57,12 @@ impl Adapter {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "/tmp".to_string()),
             state_file: state_dir.join("sessions.json"),
-            available_models: Self::fetch_available_models(),
+            // ACP initialize must be a fast, side-effect-free handshake. `agy
+            // models` can take several seconds while it contacts the local
+            // Antigravity service, which caused clients to time out and close
+            // the pipe before we could answer initialize. Defer discovery until
+            // a session actually requests its model capabilities.
+            available_models: Vec::new(),
             skip_naration,
             dangerously_skip_permissions,
             sandbox,
